@@ -27,8 +27,8 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("LCR Logger")]
 [assembly: System.Reflection.AssemblyCompany("KIM YEONGDO")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 KIM YEONGDO")]
-[assembly: System.Reflection.AssemblyVersion("1.6.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.6.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.7.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.7.0.0")]
 
 namespace LcrLogger
 {
@@ -267,6 +267,10 @@ namespace LcrLogger
     class SerialMeter : IMeter
     {
         readonly SerialPort port;
+        readonly Stream stream;
+
+        public string PortName { get { return port.PortName; } }
+        public bool IsOpen { get { return port.IsOpen; } }
 
         public SerialMeter(string portName, int baudRate)
         {
@@ -277,6 +281,9 @@ namespace LcrLogger
             port.ReadTimeout = 5000;
             port.WriteTimeout = 3000;
             port.Open();
+            // USB를 뽑은 뒤 포트 스트림의 종료자가 예외를 던져 프로그램이 꺼지는 .NET 문제를 피함
+            stream = port.BaseStream;
+            GC.SuppressFinalize(stream);
             port.DiscardInBuffer();
             port.DiscardOutBuffer();
         }
@@ -302,8 +309,13 @@ namespace LcrLogger
 
         public void Dispose()
         {
-            if (port.IsOpen) port.Close();
-            port.Dispose();
+            // 장치가 이미 분리된 경우 닫기에서 예외가 나도 무시
+            try { if (port.IsOpen) port.Close(); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            try { port.Dispose(); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
     }
 
@@ -314,9 +326,19 @@ namespace LcrLogger
         double freq = 1000;
         string trig = "INT";
 
+        // 직접 명령 ":DEMO:UNPLUG" → 5초 동안 USB가 빠진 것처럼 동작 (자동 재연결 시험용)
+        internal static DateTime UnpluggedUntil = DateTime.MinValue;
+
+        static void CheckPlugged()
+        {
+            if (DateTime.Now < UnpluggedUntil) throw new IOException("장치가 분리되었습니다 (데모).");
+        }
+
         public void Send(string command)
         {
+            CheckPlugged();
             string c = command.Trim().ToUpperInvariant();
+            if (c == ":DEMO:UNPLUG") UnpluggedUntil = DateTime.Now.AddSeconds(5);
             double v;
             if (c.StartsWith(":FREQ ") && Fmt.TryParse(c.Substring(6), out v)) freq = v;
             if (c.StartsWith(":TRIG ")) trig = c.Substring(6);
@@ -325,6 +347,7 @@ namespace LcrLogger
         public string Query(string command)
         {
             Thread.Sleep(60);
+            CheckPlugged();
             string c = command.Trim().ToUpperInvariant();
             if (c == "*IDN?") return "HIOKI,IM3536(DEMO),000000000,V1.00";
             if (c == ":MODE?") return "LCR";
@@ -643,6 +666,21 @@ namespace LcrLogger
 
         [DllImport("user32.dll")]
         public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+        [DllImport("user32.dll")]
+        static extern short GetAsyncKeyState(int vk);
+
+        // Shift/Ctrl/Alt를 누른 채 입력하면 Tab·Enter가 Shift+Tab 등으로 바뀌므로 손을 뗄 때까지 기다림
+        public static async Task WaitModifiersReleased()
+        {
+            const int VK_SHIFT = 0x10, VK_CONTROL = 0x11, VK_MENU = 0x12;
+            for (int i = 0; i < 100; i++)
+            {
+                if ((GetAsyncKeyState(VK_SHIFT) & 0x8000) == 0 && (GetAsyncKeyState(VK_CONTROL) & 0x8000) == 0 && (GetAsyncKeyState(VK_MENU) & 0x8000) == 0)
+                    return;
+                await Task.Delay(20);
+            }
+        }
 
         static INPUT Key(ushort vk, ushort scan, uint flags)
         {
@@ -1040,8 +1078,21 @@ namespace LcrLogger
     {
         ComboBox cbPort, cbBaud, cbPar1, cbUnit;
         Button btnRefresh, btnConnect, btnMeasure, btnAuto, btnFolder, btnOpenFolder, btnNewFile, btnExport, btnClear, btnSend, btnUpdate;
-        CheckBox chkDemo, chkTrg, chkMulti, chkSheet, chkAutoUpdate;
+        CheckBox chkDemo, chkTrg, chkMulti, chkSheet, chkAutoUpdate, chkReconnect;
+        Label lblRepeat;
         bool updating;
+
+        // USB 자동 재연결 상태
+        readonly System.Windows.Forms.Timer watchTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+        string connectPar1;               // 연결할 때 보낸 PAR1 (재연결 때 다시 보냄)
+        bool waitingReconnect, reconnecting, lostDemo;
+        string lostPort, lastPortList;
+        int lostBaud, reconnectTries, reconnectGen;
+        DateTime portSeenAt = DateTime.MinValue;
+
+        // 마지막 측정값 (다시 입력용)
+        List<string> lastResponses, lastPars;
+        const int RepeatHotkeyId = 0x4C44;
         ComboBox cbHotkey, cbSheetValues, cbSheetSep, cbSheetEnd;
         NumericUpDown numInterval, numCount;
         TextBox txtMemo, txtFolder, txtCmd, txtLog;
@@ -1107,10 +1158,11 @@ namespace LcrLogger
             cbBaud.Items.AddRange(new object[] { "9600", "19200", "38400", "57600", "115200" });
             cbBaud.SelectedIndex = 0;
             chkDemo = new Switch { Text = "데모 모드(계측기 없이 시험)", Margin = new Padding(12, 4, 3, 3) };
+            chkReconnect = new Switch { Text = "USB 자동 재연결", Margin = new Padding(12, 4, 3, 3) };
             btnConnect = Btn("연결", OnConnect, true);
             btnConnect.Width = 90;
             lblModel = new Label { AutoSize = true, Margin = new Padding(8, 9, 3, 3), ForeColor = Theme.Secondary, Text = "연결 안 됨" };
-            Add(conn, Lbl("COM 포트"), cbPort, btnRefresh, Lbl("속도(USB는 무관)"), cbBaud, chkDemo, btnConnect, lblModel);
+            Add(conn, Lbl("COM 포트"), cbPort, btnRefresh, Lbl("속도(USB는 무관)"), cbBaud, chkDemo, chkReconnect, btnConnect, lblModel);
             layout.Controls.Add(conn.Parent);
 
             // 2. 측정
@@ -1182,8 +1234,11 @@ namespace LcrLogger
             cbSheetEnd.SelectedIndex = 0;
             chkSheet.CheckedChanged += delegate { ApplyHotkey(); };
             cbHotkey.SelectedIndexChanged += delegate { ApplyHotkey(); };
+            lblRepeat = Lbl("");
+            lblRepeat.ForeColor = Theme.Secondary;
             Add(sheet, chkSheet, cbHotkey, Lbl("키를 누르면 측정 후 입력   값:"), cbSheetValues,
-                Lbl("값 사이"), cbSheetSep, Lbl("입력 후"), cbSheetEnd);
+                Lbl("값 사이"), cbSheetSep, Lbl("입력 후"), cbSheetEnd, lblRepeat);
+            UpdateRepeatHint();
             layout.Controls.Add(sheet.Parent);
 
             var last = Group("최근 측정값");
@@ -1267,10 +1322,15 @@ namespace LcrLogger
             FormClosing += delegate
             {
                 autoRunning = false;
-                if (hotkeyRegistered) KeyboardInput.UnregisterHotKey(Handle, HotkeyId);
+                watchTimer.Stop();
+                waitingReconnect = false;
+                reconnectGen++;
+                UnregisterHotkeys();
                 CloseMeter();
                 SaveSettings();
             };
+            watchTimer.Tick += OnWatchTick;
+            watchTimer.Start();
             Shown += async delegate
             {
                 ApplyHotkey();
@@ -1376,6 +1436,7 @@ namespace LcrLogger
             cbSheetEnd.SelectedIndex = settings.GetInt("SheetEnd", 0, 0, 2);
             chkSheet.Checked = settings.Get("SheetInput", "0") == "1";
             chkAutoUpdate.Checked = settings.Get("AutoUpdate", "1") == "1";
+            chkReconnect.Checked = settings.Get("AutoReconnect", "1") == "1";
             SetupColumns();
         }
 
@@ -1395,6 +1456,7 @@ namespace LcrLogger
             settings.Set("SheetEnd", cbSheetEnd.SelectedIndex.ToString(CultureInfo.InvariantCulture));
             settings.Set("SheetInput", chkSheet.Checked ? "1" : "0");
             settings.Set("AutoUpdate", chkAutoUpdate.Checked ? "1" : "0");
+            settings.Set("AutoReconnect", chkReconnect.Checked ? "1" : "0");
             settings.Set("Freqs", string.Join(";", txtFreq.Select(t => t.Text.Trim())));
             var port = cbPort.SelectedItem as PortItem;
             if (port != null) settings.Set("Port", port.Port);
@@ -1484,6 +1546,13 @@ namespace LcrLogger
 
         async void OnConnect(object sender, EventArgs e)
         {
+            if (waitingReconnect)
+            {
+                CancelReconnect();
+                Log("자동 재연결을 취소했습니다.");
+                UpdateUi();
+                return;
+            }
             if (meter != null)
             {
                 autoRunning = false;
@@ -1525,55 +1594,12 @@ namespace LcrLogger
                 }
 
                 string par1 = cbPar1.SelectedIndex > 0 ? (string)cbPar1.SelectedItem : null;
-                IMeter local = m;
-                string idn = await Io(() =>
-                {
-                    string id = local.Query("*IDN?");
-                    local.Send(":HEAD OFF");
-                    return id;
-                });
-                Log("응답: " + idn);
-
-                // :PAR1? 등은 LCR 모드 전용이라 연속 측정(CONT) 모드에서는 응답하지 않음
-                string mode = null;
-                try
-                {
-                    mode = await Io(() => local.Query(":MODE?").ToUpperInvariant());
-                }
-                catch (TimeoutException)
-                {
-                    Log("측정 모드 확인(:MODE?) 응답 없음 - 계속 진행합니다.");
-                }
-                if (mode != null && mode != "LCR")
-                {
-                    var answer = MessageBox.Show(this,
-                        "계측기가 '" + mode + "' 모드입니다. 이 프로그램은 LCR 모드에서 측정합니다.\n\nLCR 모드로 바꿀까요?\n\n"
-                        + "연속 측정 모드에 설정한 여러 주파수는 '다중 주파수 측정'에 입력하면 같은 방식으로 측정됩니다.",
-                        "측정 모드", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-                    if (answer != DialogResult.Yes)
-                        throw new InvalidOperationException("계측기가 LCR 모드가 아니어서 연결을 취소했습니다.");
-                    await Io(() => { local.Send(":MODE LCR"); Thread.Sleep(500); return true; });
-                    Log("계측기를 LCR 모드로 바꿨습니다.");
-                }
-
-                List<string> names;
-                try
-                {
-                    names = await Io(() =>
-                    {
-                        if (par1 != null) local.Send(":PAR1 " + par1);
-                        var list = new List<string>();
-                        for (int i = 1; i <= 4; i++)
-                            list.Add(local.Query(":PAR" + i + "?").ToUpperInvariant());
-                        return list;
-                    });
-                }
-                catch (TimeoutException ex)
-                {
-                    throw new TimeoutException(ex.Message + "\n계측기 화면이 LCR 모드(일반 측정 화면)인지 확인하세요.");
-                }
+                var hs = await Handshake(m, par1, true);
+                string idn = hs.Key;
+                List<string> names = hs.Value;
 
                 meter = m;
+                connectPar1 = par1;
                 pars = names.Where(p => p.Length > 0 && p != "OFF").ToList();
                 freqs = newFreqs;
                 freqLabels = freqs.Select(Fmt.FrequencyLabel).ToList();
@@ -1600,16 +1626,208 @@ namespace LcrLogger
             }
         }
 
+        // 연결 확인 절차: *IDN?, LCR 모드 확인, 측정 파라미터 읽기. 결과는 (IDN, PAR1~4)
+        // interactive=false(자동 재연결)이면 묻지 않고 LCR 모드로 바꿈 (끊기기 전에 LCR 모드로 쓰던 계측기)
+        async Task<KeyValuePair<string, List<string>>> Handshake(IMeter local, string par1, bool interactive)
+        {
+            string idn = await Io(() =>
+            {
+                string id = local.Query("*IDN?");
+                local.Send(":HEAD OFF");
+                return id;
+            });
+            Log("응답: " + idn);
+
+            // :PAR1? 등은 LCR 모드 전용이라 연속 측정(CONT) 모드에서는 응답하지 않음
+            string mode = null;
+            try
+            {
+                mode = await Io(() => local.Query(":MODE?").ToUpperInvariant());
+            }
+            catch (TimeoutException)
+            {
+                Log("측정 모드 확인(:MODE?) 응답 없음 - 계속 진행합니다.");
+            }
+            if (mode != null && mode != "LCR")
+            {
+                if (interactive)
+                {
+                    var answer = MessageBox.Show(this,
+                        "계측기가 '" + mode + "' 모드입니다. 이 프로그램은 LCR 모드에서 측정합니다.\n\nLCR 모드로 바꿀까요?\n\n"
+                        + "연속 측정 모드에 설정한 여러 주파수는 '다중 주파수 측정'에 입력하면 같은 방식으로 측정됩니다.",
+                        "측정 모드", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                    if (answer != DialogResult.Yes)
+                        throw new InvalidOperationException("계측기가 LCR 모드가 아니어서 연결을 취소했습니다.");
+                }
+                await Io(() => { local.Send(":MODE LCR"); Thread.Sleep(500); return true; });
+                Log("계측기를 LCR 모드로 바꿨습니다.");
+            }
+
+            try
+            {
+                var names = await Io(() =>
+                {
+                    if (par1 != null) local.Send(":PAR1 " + par1);
+                    var list = new List<string>();
+                    for (int i = 1; i <= 4; i++)
+                        list.Add(local.Query(":PAR" + i + "?").ToUpperInvariant());
+                    return list;
+                });
+                return new KeyValuePair<string, List<string>>(idn, names);
+            }
+            catch (TimeoutException ex)
+            {
+                throw new TimeoutException(ex.Message + "\n계측기 화면이 LCR 모드(일반 측정 화면)인지 확인하세요.");
+            }
+        }
+
         void CloseMeter()
         {
             if (meter == null) return;
             lock (ioLock)
             {
-                try { meter.Dispose(); } catch (IOException) { }
+                try { meter.Dispose(); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
                 meter = null;
             }
             lblModel.Text = "연결 안 됨";
             lblModel.ForeColor = Theme.Secondary;
+        }
+
+        // ---------------- USB 자동 재연결 ----------------
+
+        // 통신 오류가 케이블 분리 때문인지 판단 (응답 없음은 포트가 사라졌을 때만 분리로 봄)
+        internal static bool IsDisconnect(Exception ex, IMeter m)
+        {
+            if (ex is IOException || ex is UnauthorizedAccessException) return true;
+            var serial = m as SerialMeter;
+            if (serial == null) return false;
+            if (ex is InvalidOperationException && !serial.IsOpen) return true;
+            return !PortExists(serial.PortName);
+        }
+
+        static bool PortExists(string port)
+        {
+            return SerialPort.GetPortNames().Any(p => string.Equals(p, port, StringComparison.OrdinalIgnoreCase));
+        }
+
+        void OnLost(string reason)
+        {
+            if (meter == null) return;
+            var serial = meter as SerialMeter;
+            bool demo = meter is DemoMeter;
+            autoRunning = false;
+            CloseMeter();
+            SystemSounds.Hand.Play();
+            if (!chkReconnect.Checked)
+            {
+                Log(reason + " 케이블을 확인하고 다시 [연결]하세요.");
+                UpdateUi();
+                return;
+            }
+            waitingReconnect = true;
+            lostDemo = demo;
+            lostPort = serial != null ? serial.PortName : null;
+            int baud;
+            lostBaud = int.TryParse(cbBaud.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out baud) ? baud : 9600;
+            reconnectTries = 0;
+            reconnectGen++;
+            portSeenAt = DateTime.MinValue;
+            lastPortList = null;
+            lblModel.Text = "USB 연결 끊김 - 다시 연결되기를 기다리는 중...";
+            lblModel.ForeColor = Theme.Red;
+            Log(reason + " 케이블이 다시 연결되면 자동으로 연결합니다.");
+            UpdateUi();
+        }
+
+        void CancelReconnect()
+        {
+            waitingReconnect = false;
+            reconnectGen++;
+            lblModel.Text = "연결 안 됨";
+            lblModel.ForeColor = Theme.Secondary;
+        }
+
+        void OnWatchTick(object sender, EventArgs e)
+        {
+            if (busy || reconnecting) return;
+            var serial = meter as SerialMeter;
+            if (serial != null)
+            {
+                if (!PortExists(serial.PortName)) OnLost("USB 연결이 끊어졌습니다 (" + serial.PortName + ").");
+                return;
+            }
+            if (!waitingReconnect) return;
+
+            string candidate = null;
+            if (lostDemo) candidate = "DEMO";
+            else
+            {
+                string[] names = SerialPort.GetPortNames();
+                if (lostPort != null && names.Any(p => string.Equals(p, lostPort, StringComparison.OrdinalIgnoreCase)))
+                    candidate = lostPort;
+                else
+                {
+                    // 다른 USB 단자에 꽂으면 COM 번호가 바뀔 수 있으므로 HIOKI 장비를 찾음 (포트 목록이 바뀔 때만 조회)
+                    string list = string.Join(",", names.OrderBy(p => p));
+                    if (list != lastPortList)
+                    {
+                        lastPortList = list;
+                        var hioki = PortItem.Enumerate().FirstOrDefault(p => p.Hioki);
+                        if (hioki != null) lostPort = candidate = hioki.Port;
+                    }
+                }
+            }
+            if (candidate == null) { portSeenAt = DateTime.MinValue; return; }
+            // 장치가 다시 나타난 뒤 준비될 시간을 잠깐 줌
+            if (portSeenAt == DateTime.MinValue) { portSeenAt = DateTime.Now; return; }
+            if ((DateTime.Now - portSeenAt).TotalMilliseconds < 1500) return;
+            TryReconnect(candidate);
+        }
+
+        async void TryReconnect(string port)
+        {
+            reconnecting = true;
+            int gen = reconnectGen;
+            IMeter m = null;
+            try
+            {
+                int baud = lostBaud;
+                m = lostDemo ? new DemoMeter() : await Task.Run(() => (IMeter)new SerialMeter(port, baud));
+                var hs = await Handshake(m, connectPar1, false);
+                if (gen != reconnectGen || meter != null)
+                {
+                    m.Dispose();   // 기다리는 동안 사용자가 취소함
+                    return;
+                }
+                var newPars = hs.Value.Where(p => p.Length > 0 && p != "OFF").ToList();
+                meter = m;
+                m = null;
+                waitingReconnect = false;
+                lblModel.Text = hs.Key;
+                lblModel.ForeColor = Theme.Green;
+                Log("자동 재연결됨: " + hs.Key + (lostDemo ? "" : " (" + port + ")"));
+                if (!newPars.SequenceEqual(pars))
+                {
+                    pars = newPars;
+                    StartNewTable("계측기의 측정 파라미터가 바뀌어 새 파일로 시작합니다.");
+                }
+                SystemSounds.Asterisk.Play();
+            }
+            catch (Exception ex)
+            {
+                if (m != null) { try { m.Dispose(); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
+                reconnectTries++;
+                portSeenAt = DateTime.Now;   // 다음 시도까지 잠깐 쉼
+                if (reconnectTries == 1 || reconnectTries % 10 == 0)
+                    Log("재연결 시도 " + reconnectTries + "회 실패 - 계속 시도합니다: " + ex.Message.Split('\n')[0]);
+            }
+            finally
+            {
+                reconnecting = false;
+                UpdateUi();
+            }
         }
 
         Task<T> Io<T>(Func<T> work)
@@ -1646,7 +1864,8 @@ namespace LcrLogger
             }
             catch (Exception ex)
             {
-                Log("측정 실패: " + ex.Message);
+                if (IsDisconnect(ex, m)) OnLost("USB 연결이 끊어졌습니다: " + ex.Message);
+                else Log("측정 실패: " + ex.Message);
                 return null;
             }
             finally
@@ -1688,6 +1907,8 @@ namespace LcrLogger
                     Log("※ 응답 값 개수(" + count + ")가 파라미터 개수(" + pars.Count + ")와 다릅니다. 원본응답 열을 확인하세요.");
             }
 
+            lastResponses = responses;
+            lastPars = pars;
             string[] row = Fmt.RowFields(rows.Count + 1, DateTime.Now, txtMemo.Text, pars, responses, unitIndex);
             rows.Add(row);
             grid.Rows.Add(row);
@@ -1767,20 +1988,36 @@ namespace LcrLogger
 
         // ---------------- 스프레드시트 입력 ----------------
 
+        void UnregisterHotkeys()
+        {
+            if (!hotkeyRegistered || !IsHandleCreated) return;
+            KeyboardInput.UnregisterHotKey(Handle, HotkeyId);
+            KeyboardInput.UnregisterHotKey(Handle, RepeatHotkeyId);
+            hotkeyRegistered = false;
+        }
+
+        void UpdateRepeatHint()
+        {
+            lblRepeat.Text = "Shift+" + HotkeyChoices[cbHotkey.SelectedIndex] + ": 마지막 값 다시 입력";
+        }
+
         void ApplyHotkey()
         {
+            UpdateRepeatHint();
             if (!IsHandleCreated) return;
-            if (hotkeyRegistered)
-            {
-                KeyboardInput.UnregisterHotKey(Handle, HotkeyId);
-                hotkeyRegistered = false;
-            }
+            UnregisterHotkeys();
             if (!chkSheet.Checked) return;
             Keys key = HotkeyChoices[cbHotkey.SelectedIndex];
-            const uint MOD_NOREPEAT = 0x4000;
+            const uint MOD_SHIFT = 0x0004, MOD_NOREPEAT = 0x4000;
             hotkeyRegistered = KeyboardInput.RegisterHotKey(Handle, HotkeyId, MOD_NOREPEAT, (uint)key);
             if (hotkeyRegistered)
+            {
                 Log("스프레드시트 입력 켜짐: 셀을 선택하고 " + key + " 키를 누르세요.");
+                if (KeyboardInput.RegisterHotKey(Handle, RepeatHotkeyId, MOD_SHIFT | MOD_NOREPEAT, (uint)key))
+                    Log("마지막 값 다시 입력: Shift+" + key);
+                else
+                    Log("※ Shift+" + key + " 키를 다른 프로그램이 쓰고 있어 '마지막 값 다시 입력'은 쓸 수 없습니다.");
+            }
             else
                 Log("※ " + key + " 키를 다른 프로그램이 쓰고 있습니다. 다른 키를 고르세요.");
         }
@@ -1789,7 +2026,69 @@ namespace LcrLogger
         {
             if (m.Msg == WM_HOTKEY && (int)m.WParam == HotkeyId)
                 OnSheetHotkey();
+            else if (m.Msg == WM_HOTKEY && (int)m.WParam == RepeatHotkeyId)
+                OnRepeatHotkey();
             base.WndProc(ref m);
+        }
+
+        // 다시 측정하지 않고 직전 측정값을 선택한 셀에 다시 입력 (셀 위치를 잘못 잡았을 때)
+        async void OnRepeatHotkey()
+        {
+            if (busy)
+            {
+                SystemSounds.Hand.Play();
+                Log("다시 입력: 측정 중이라 무시했습니다.");
+                return;
+            }
+            if (lastResponses == null)
+            {
+                SystemSounds.Hand.Play();
+                Log("다시 입력: 아직 측정한 값이 없습니다.");
+                return;
+            }
+            IntPtr target = KeyboardInput.GetForegroundWindow();
+            if (target == Handle)
+            {
+                Log("다시 입력: 스프레드시트에서 셀을 선택한 뒤 눌러 주세요.");
+                return;
+            }
+            await TypeIntoSheet(target, lastPars, lastResponses, "마지막 값 다시 입력 (#" + rows.Count + ")");
+        }
+
+        // 값을 Tab/Enter로 구분해 입력. 입력 전에 Shift 등에서 손을 뗄 때까지 기다리고, 창이 바뀌었으면 입력하지 않음.
+        async Task TypeIntoSheet(IntPtr target, List<string> valuePars, List<string> responses, string what)
+        {
+            await KeyboardInput.WaitModifiersReleased();
+            if (KeyboardInput.GetForegroundWindow() != target)
+            {
+                SystemSounds.Hand.Play();
+                Log("단축키: 다른 창으로 바뀌어 입력하지 않았습니다 (CSV에는 저장됨).");
+                return;
+            }
+            List<string> values = Fmt.TypedValues(valuePars, responses, unitIndex, cbSheetValues.SelectedIndex == 0);
+            Keys separator = cbSheetSep.SelectedIndex == 0 ? Keys.Tab : Keys.Enter;
+            try
+            {
+                for (int i = 0; i < values.Count; i++)
+                {
+                    KeyboardInput.TypeText(values[i]);
+                    await Task.Delay(30);
+                    if (i < values.Count - 1)
+                    {
+                        KeyboardInput.PressKey(separator);
+                        await Task.Delay(30);
+                    }
+                }
+                if (cbSheetEnd.SelectedIndex == 0) KeyboardInput.PressKey(Keys.Enter);
+                else if (cbSheetEnd.SelectedIndex == 1) KeyboardInput.PressKey(Keys.Tab);
+                SystemSounds.Asterisk.Play();
+                Log(what + ": " + string.Join(", ", values));
+            }
+            catch (Exception ex)
+            {
+                SystemSounds.Hand.Play();
+                Log("스프레드시트 입력 실패: " + ex.Message);
+            }
         }
 
         async void OnSheetHotkey()
@@ -1814,37 +2113,7 @@ namespace LcrLogger
                 Log("단축키: 이 프로그램 창이 선택되어 있어 측정만 했습니다.");
                 return;
             }
-            if (KeyboardInput.GetForegroundWindow() != target)
-            {
-                SystemSounds.Hand.Play();
-                Log("단축키: 측정 중에 다른 창으로 바뀌어 입력하지 않았습니다 (CSV에는 저장됨).");
-                return;
-            }
-
-            List<string> values = Fmt.TypedValues(pars, responses, unitIndex, cbSheetValues.SelectedIndex == 0);
-            Keys separator = cbSheetSep.SelectedIndex == 0 ? Keys.Tab : Keys.Enter;
-            try
-            {
-                for (int i = 0; i < values.Count; i++)
-                {
-                    KeyboardInput.TypeText(values[i]);
-                    await Task.Delay(30);
-                    if (i < values.Count - 1)
-                    {
-                        KeyboardInput.PressKey(separator);
-                        await Task.Delay(30);
-                    }
-                }
-                if (cbSheetEnd.SelectedIndex == 0) KeyboardInput.PressKey(Keys.Enter);
-                else if (cbSheetEnd.SelectedIndex == 1) KeyboardInput.PressKey(Keys.Tab);
-                SystemSounds.Asterisk.Play();
-                Log("스프레드시트에 입력: " + string.Join(", ", values));
-            }
-            catch (Exception ex)
-            {
-                SystemSounds.Hand.Play();
-                Log("스프레드시트 입력 실패: " + ex.Message);
-            }
+            await TypeIntoSheet(target, pars, responses, "스프레드시트에 입력");
         }
 
         // ---------------- 저장 ----------------
@@ -1955,7 +2224,8 @@ namespace LcrLogger
             }
             catch (Exception ex)
             {
-                Log("명령 실패: " + ex.Message);
+                if (IsDisconnect(ex, m)) OnLost("USB 연결이 끊어졌습니다: " + ex.Message);
+                else Log("명령 실패: " + ex.Message);
             }
             finally
             {
@@ -1969,10 +2239,12 @@ namespace LcrLogger
         void UpdateUi()
         {
             bool connected = meter != null;
-            btnConnect.Text = connected ? "연결 해제" : "연결";
+            btnConnect.Text = connected ? "연결 해제" : waitingReconnect ? "재연결 취소" : "연결";
             btnConnect.Enabled = !busy || connected;
-            cbPort.Enabled = btnRefresh.Enabled = cbBaud.Enabled = chkDemo.Enabled = cbPar1.Enabled = chkMulti.Enabled = !connected && !busy;
-            foreach (TextBox t in txtFreq) t.Enabled = !connected && !busy;
+            // 재연결을 기다리는 동안에는 끊기기 전 설정 그대로 다시 연결하므로 설정을 잠금
+            bool editable = !connected && !busy && !waitingReconnect;
+            cbPort.Enabled = btnRefresh.Enabled = cbBaud.Enabled = chkDemo.Enabled = cbPar1.Enabled = chkMulti.Enabled = editable;
+            foreach (TextBox t in txtFreq) t.Enabled = editable;
             chkTrg.Enabled = freqs.Count == 0 || !connected;
             btnMeasure.Enabled = connected && !busy && !autoRunning;
             btnAuto.Enabled = connected;
@@ -2081,6 +2353,14 @@ namespace LcrLogger
                     "{\"name\":\"LCR_Logger.exe\",\"browser_download_url\":\"https://e/exe\",\"size\":54272,\"digest\":\"sha256:ABCDEF\"}]}");
                 Check(exeOnly.Asset.Url == "https://e/exe" && exeOnly.Asset.Size == 54272 && exeOnly.Asset.Sha256 == "abcdef", "릴리스 정보 해석 (exe만)");
                 Check(Updater.Parse("{\"tag_name\":\"v1.5\",\"assets\":[]}").Asset == null, "첨부 파일 없는 릴리스");
+                Check(MainForm.IsDisconnect(new IOException("x"), new DemoMeter()), "통신 오류는 연결 끊김으로 판단");
+                Check(!MainForm.IsDisconnect(new TimeoutException("x"), new DemoMeter()), "응답 없음은 연결 끊김 아님(데모)");
+                var unplug = new DemoMeter();
+                unplug.Send(":DEMO:UNPLUG");
+                bool threw = false;
+                try { unplug.Query(":MEAS?"); } catch (IOException) { threw = true; }
+                DemoMeter.UnpluggedUntil = DateTime.MinValue;
+                Check(threw && unplug.Query("*IDN?").StartsWith("HIOKI"), "데모 USB 분리/재연결 흉내");
                 output.AppendLine("SELFTEST OK");
                 Print(output.ToString());
                 return 0;

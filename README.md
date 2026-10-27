@@ -11,15 +11,18 @@ CSV 파일은 엑셀에서 바로 열 수 있고, 구글 스프레드시트에�
 프로그램은 시작할 때(그리고 **업데이트 확인** 버튼을 누를 때) GitHub API `releases/latest`를 조회합니다.
 
 - **판별:** 릴리스 태그(`v1.5` 등)가 실행 중인 버전보다 높으면 사용자에게 묻습니다.
-- **교체:** 릴리스에 첨부된 `LCR_Logger.exe`를 `LCR_Logger.exe.new`로 받아 검사(MZ 헤더, 크기, GitHub가 제공하는 SHA-256 digest)합니다.
-  그런 다음 실행 중인 exe를 `.old`로 이름 바꾸고 새 exe를 넣은 뒤 다시 시작합니다. `.old`는 다음 실행 때 지웁니다.
+- **받는 파일:** 릴리스에 첨부된 배포 zip(`LCR_Logger*.zip`)을 받습니다. zip이 없으면 `LCR_Logger.exe` 첨부 파일을 받습니다.
+  - 받은 파일은 크기와 GitHub가 제공하는 SHA-256 digest로 검사합니다.
+  - zip이면 그 안의 `LCR_Logger.exe`와 `*.txt`(사용설명서)를 꺼냅니다. exe는 MZ 헤더도 확인합니다.
+- **교체:** 실행 중인 exe를 `.old`로 이름 바꾸고 새 exe를 넣은 뒤 다시 시작합니다. `.old`는 다음 실행 때 지웁니다.
 - **실패 시:** 네트워크 오류나 쓰기 권한 문제가 있으면 기존 버전을 그대로 씁니다.
 
 새 버전 배포 순서:
 
 1. `src\LcrLogger.cs`의 `AssemblyVersion`/`AssemblyFileVersion`을 올립니다(예: `1.5.0.0`).
 2. 변경을 커밋하고 `git push`합니다.
-3. `publish_release.bat "변경 내용"`을 실행합니다. 빌드 → zip 생성 → `gh release create v1.5`로 exe와 zip을 올립니다.
+3. `publish_release.bat "변경 내용"`을 실행합니다. 빌드 → zip 생성 → `gh release create v1.5`로 zip을 올립니다.
+   웹에서 직접 올릴 때도 태그 `v1.5`로 릴리스를 만들고 `release\LCR_Logger_v1.5.zip` 하나만 첨부하면 됩니다.
 
 저장소는 공개(public)여야 프로그램이 로그인 없이 릴리스를 받을 수 있습니다.
 
