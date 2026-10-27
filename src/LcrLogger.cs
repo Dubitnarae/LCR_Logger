@@ -1,4 +1,4 @@
-// LCR Logger - HIOKI LCR 미터(IM3536 / IM3523 / IM3533 / IM3590 / IM7580 등)에서
+﻿// LCR Logger - HIOKI LCR 미터(IM3536 / IM3523 / IM3533 / IM3590 / IM7580 등)에서
 // 측정값을 USB(가상 COM 포트)로 받아 CSV 파일로 저장하는 프로그램.
 //
 // 통신 사양은 HIOKI "LCR Meter Sample Application" 1.4.0 분석 결과를 따름:
@@ -27,8 +27,8 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("LCR Logger")]
 [assembly: System.Reflection.AssemblyCompany("KIM YEONGDO")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 KIM YEONGDO")]
-[assembly: System.Reflection.AssemblyVersion("1.8.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.8.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.9.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.9.0.0")]
 
 namespace LcrLogger
 {
@@ -327,8 +327,17 @@ namespace LcrLogger
         public string Speed;       // FAST / MEDium / SLOW / SLOW2
         public int Bias;           // 0 변경 안 함, 1 OFF, 2 ON
         public double BiasVolts;
+        public string[] Pars = new string[4];   // PAR1~PAR4에 보낼 파라미터 (null이면 변경 안 함)
 
-        public bool Any { get { return Cv || Speed != null || Bias != 0; } }
+        public bool Any { get { return Cv || Speed != null || Bias != 0 || Pars.Any(p => p != null); } }
+
+        static string ParKey(int i) { return ":PARameter" + (i + 1); }
+
+        static string NormPar(string p)
+        {
+            p = p.Trim().ToUpperInvariant();
+            return p == "PH" ? "PHASE" : p == "DC" ? "RDC" : p;
+        }
 
         static string Volts(double v, string format)
         {
@@ -339,6 +348,8 @@ namespace LcrLogger
         public Dictionary<string, string> Read(IMeter m)
         {
             var s = new Dictionary<string, string>();
+            for (int i = 0; i < Pars.Length; i++)
+                if (Pars[i] != null) s[ParKey(i)] = m.Query(ParKey(i) + "?");
             if (Cv)
             {
                 s[":LEVel"] = m.Query(":LEVel?");
@@ -354,6 +365,21 @@ namespace LcrLogger
         public List<string> Apply(IMeter m)
         {
             var log = new List<string>();
+            if (Pars.Any(p => p != null))
+            {
+                for (int i = 0; i < Pars.Length; i++)
+                    if (Pars[i] != null) m.Send(ParKey(i) + " " + Pars[i]);
+                var got = new List<string>();
+                bool ok = true;
+                for (int i = 0; i < Pars.Length; i++)
+                {
+                    if (Pars[i] == null) continue;
+                    string g = m.Query(ParKey(i) + "?");
+                    got.Add("PAR" + (i + 1) + "=" + g);
+                    if (NormPar(g) != NormPar(Pars[i])) ok = false;
+                }
+                log.Add("측정 조건: " + string.Join(", ", got) + (ok ? "" : "  ※ 계측기가 값을 받지 않았습니다. 같은 파라미터가 겹치지 않는지 확인하세요."));
+            }
             if (Cv)
             {
                 m.Send(":LEVel:CVOLTage " + Volts(CvVolts, "0.000"));
@@ -405,6 +431,9 @@ namespace LcrLogger
                 if (s.TryGetValue(":LEVel:CVOLTage", out v) && v.Length > 0) m.Send(":LEVel:CVOLTage " + v);
                 if (s.TryGetValue(":LEVel", out v) && v.Length > 0) m.Send(":LEVel " + v);
             }
+            // PAR는 맨 나중에 PAR1부터 차례로
+            for (int i = 0; i < Pars.Length; i++)
+                if (Pars[i] != null && s.TryGetValue(ParKey(i), out v) && v.Length > 0) m.Send(ParKey(i) + " " + v);
         }
     }
 
@@ -415,6 +444,14 @@ namespace LcrLogger
         double freq = 1000;
         string trig = "INT";
         string level = "V", cvolt = "1.000", speed = "MEDIUM", dcbias = "OFF", dclevel = "0.00";
+        readonly string[] pars = { "LS", "Q", "OFF", "OFF" };
+
+        // ":PAR2" / ":PARAMETER2" 형태에서 번호(1~4)를 읽음. 아니면 0
+        static int ParIndex(string c)
+        {
+            Match m = Regex.Match(c, @"^:PAR(?:AMETER)?([1-4])(?:\s|\?|$)");
+            return m.Success ? int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture) : 0;
+        }
 
         // 직접 명령 ":DEMO:UNPLUG" → 5초 동안 USB가 빠진 것처럼 동작 (자동 재연결 시험용)
         internal static DateTime UnpluggedUntil = DateTime.MinValue;
@@ -432,6 +469,8 @@ namespace LcrLogger
             double v;
             if (c.StartsWith(":FREQ ") && Fmt.TryParse(c.Substring(6), out v)) freq = v;
             if (c.StartsWith(":TRIG ")) trig = c.Substring(6);
+            int pi = ParIndex(c);
+            if (pi > 0 && c.IndexOf(' ') > 0) pars[pi - 1] = c.Substring(c.IndexOf(' ') + 1).Trim();
             if (c.StartsWith(":LEVEL:CVOLTAGE ")) cvolt = c.Substring(16);
             else if (c.StartsWith(":LEVEL ")) level = c.Substring(7);
             if (c.StartsWith(":SPEED ")) speed = c.Substring(7) == "MED" ? "MEDIUM" : c.Substring(7);
@@ -453,16 +492,21 @@ namespace LcrLogger
             if (c == ":SPEED?") return speed;
             if (c == ":DCBIAS?") return dcbias;
             if (c == ":DCBIAS:LEVEL?") return dclevel;
-            if (c == ":PAR1?") return "LS";
-            if (c == ":PAR2?") return "Q";
-            if (c == ":PAR3?" || c == ":PAR4?") return "OFF";
+            int pi = ParIndex(c);
+            if (pi > 0 && c.EndsWith("?")) return pars[pi - 1];
             if (c == ":MEAS?" || c == "*TRG;:MEAS?")
             {
-                // 주파수가 올라가면 인덕턴스가 조금 줄어드는 코일을 흉내 냄
+                // 주파수가 올라가면 인덕턴스가 조금 줄어드는 코일을 흉내 냄. 켜진 파라미터마다 값 하나
                 double l = 100e-6 * (1 - 0.01 * Math.Log10(freq / 1000)) * (1 + (rnd.NextDouble() - 0.5) * 0.002);
                 double q = 45 * Math.Sqrt(freq / 1000) + rnd.NextDouble();
-                return l.ToString("0.00000E+00", CultureInfo.InvariantCulture) + ","
-                     + q.ToString("0.00000E+00", CultureInfo.InvariantCulture);
+                var values = new List<string>();
+                foreach (string p in pars)
+                {
+                    if (p == "OFF") continue;
+                    double v = p == "LS" || p == "LP" ? l : p == "Q" ? q : p == "D" ? 1 / q : p == "PHASE" ? 90 - 1 / q : 2 * Math.PI * freq * l;
+                    values.Add(v.ToString("0.00000E+00", CultureInfo.InvariantCulture));
+                }
+                return string.Join(",", values);
             }
             return "";
         }
@@ -1176,7 +1220,8 @@ namespace LcrLogger
 
     class MainForm : Form
     {
-        ComboBox cbPort, cbBaud, cbPar1, cbUnit, cbSpeed, cbBias;
+        ComboBox cbPort, cbBaud, cbUnit, cbSpeed, cbBias;
+        ComboBox[] cbPar;                           // PAR2~PAR4 (PAR1은 Ls 고정)
         CheckBox chkCv;
         TextBox txtCv, txtBias;
         MeasCond connectCond;                       // 연결할 때 적용한 측정 조건 (재연결 때 다시 보냄)
@@ -1188,7 +1233,7 @@ namespace LcrLogger
 
         // USB 자동 재연결 상태
         readonly System.Windows.Forms.Timer watchTimer = new System.Windows.Forms.Timer { Interval = 1000 };
-        string connectPar1;               // 연결할 때 보낸 PAR1 (재연결 때 다시 보냄)
+        static readonly string[] ParChoices = { "변경 안 함", "OFF", "Z", "Y", "PHASE", "CS", "CP", "D", "LP", "Q", "RS", "G", "RP", "X", "B", "RDC", "S", "E" };
         bool waitingReconnect, reconnecting, lostDemo;
         string lostPort, lastPortList;
         int lostBaud, reconnectTries, reconnectGen;
@@ -1272,9 +1317,6 @@ namespace LcrLogger
 
             // 2. 측정
             var meas = Group("2. 측정");
-            cbPar1 = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 110 };
-            cbPar1.Items.AddRange(new object[] { "변경 안 함", "LS", "LP" });
-            cbPar1.SelectedIndex = 0;
             cbUnit = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 60 };
             cbUnit.Items.AddRange(Fmt.InductanceUnits);
             cbUnit.SelectedIndex = unitIndex;
@@ -1287,7 +1329,7 @@ namespace LcrLogger
             numCount = new NumericUpDown { Width = 60, Minimum = 0, Maximum = 100000, Value = 10 };
             btnAuto = Btn("연속 측정 시작", OnAuto);
             btnAuto.Width = 120;
-            Add(meas, Lbl("연결 시 PAR1"), cbPar1, Lbl("L 단위"), cbUnit, Lbl("메모"), txtMemo, btnMeasure, chkTrg,
+            Add(meas, Lbl("L 단위"), cbUnit, Lbl("메모"), txtMemo, btnMeasure, chkTrg,
                 Lbl("간격(초)"), numInterval, Lbl("횟수(0=무한)"), numCount, btnAuto);
             meas.SetFlowBreak(chkTrg, true);
             layout.Controls.Add(meas.Parent);
@@ -1323,6 +1365,18 @@ namespace LcrLogger
             var condHint = Lbl("CV 0.005~5 V · DC 바이어스 0~2.5 V · 계측기가 받은 값은 로그에 표시");
             condHint.ForeColor = Theme.Secondary;
             Add(cond, chkCv, txtCv, Lbl("V"), Lbl("SPEED"), cbSpeed, Lbl("DC 바이어스"), cbBias, txtBias, Lbl("V"), condHint);
+            cond.SetFlowBreak(condHint, true);
+            cbPar = new ComboBox[3];
+            var parRow = new List<Control> { Lbl("측정 파라미터   PAR1"), new Label { Text = "Ls (고정)", AutoSize = true, Margin = new Padding(3, 9, 6, 3), ForeColor = Theme.Text } };
+            for (int i = 0; i < cbPar.Length; i++)
+            {
+                cbPar[i] = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 100 };
+                cbPar[i].Items.AddRange(ParChoices);
+                cbPar[i].SelectedIndex = 0;
+                parRow.Add(Lbl("PAR" + (i + 2)));
+                parRow.Add(cbPar[i]);
+            }
+            Add(cond, parRow.ToArray());
             layout.Controls.Add(cond.Parent);
 
             // 3. 저장
@@ -1542,7 +1596,8 @@ namespace LcrLogger
             txtFolder.Text = settings.Get("Folder", defaultFolder);
             unitIndex = settings.GetInt("Unit", 2, 0, Fmt.InductanceUnits.Length - 1);
             cbUnit.SelectedIndex = unitIndex;
-            cbPar1.SelectedIndex = settings.GetInt("Par1", 1, 0, cbPar1.Items.Count - 1);   // 기본: LS
+            for (int i = 0; i < cbPar.Length; i++)
+                cbPar[i].SelectedIndex = settings.GetInt("CondPar" + (i + 2), 0, 0, ParChoices.Length - 1);
             cbBaud.SelectedIndex = settings.GetInt("Baud", 0, 0, cbBaud.Items.Count - 1);
             chkTrg.Checked = settings.Get("ExtTrigger", "0") == "1";
             numInterval.Value = settings.GetInt("IntervalMs", 1000, 200, 3600000) / 1000M;
@@ -1570,7 +1625,8 @@ namespace LcrLogger
         {
             settings.Set("Folder", txtFolder.Text);
             settings.Set("Unit", unitIndex.ToString(CultureInfo.InvariantCulture));
-            settings.Set("Par1", cbPar1.SelectedIndex.ToString(CultureInfo.InvariantCulture));
+            for (int i = 0; i < cbPar.Length; i++)
+                settings.Set("CondPar" + (i + 2), cbPar[i].SelectedIndex.ToString(CultureInfo.InvariantCulture));
             settings.Set("Baud", cbBaud.SelectedIndex.ToString(CultureInfo.InvariantCulture));
             settings.Set("ExtTrigger", chkTrg.Checked ? "1" : "0");
             settings.Set("IntervalMs", ((int)(numInterval.Value * 1000)).ToString(CultureInfo.InvariantCulture));
@@ -1724,16 +1780,13 @@ namespace LcrLogger
                     if (newFreqs.Count == 0) throw new InvalidOperationException("다중 주파수 측정에 사용할 주파수를 하나 이상 입력하세요.");
                 }
 
-                string par1 = cbPar1.SelectedIndex > 0 ? (string)cbPar1.SelectedItem : null;
                 MeasCond cond = ReadCond();
-                var hs = await Handshake(m, par1, true);
+                savedCond = null;
+                var hs = await Handshake(m, cond, true, false);
                 string idn = hs.Key;
                 List<string> names = hs.Value;
-                savedCond = null;
-                await ApplyConditions(m, cond, false);
 
                 meter = m;
-                connectPar1 = par1;
                 connectCond = cond;
                 pars = names.Where(p => p.Length > 0 && p != "OFF").ToList();
                 freqs = newFreqs;
@@ -1745,7 +1798,7 @@ namespace LcrLogger
                 if (freqs.Count > 0)
                     Log("다중 주파수 측정: " + string.Join(", ", freqLabels));
                 if (!pars.Any(Fmt.IsInductance))
-                    Log("※ 인덕턴스(Ls/Lp)가 파라미터에 없습니다. 계측기에서 설정하거나 '연결 시 PAR1'을 LS로 선택 후 다시 연결하세요.");
+                    Log("※ 인덕턴스(Ls/Lp)가 파라미터에 없습니다. 계측기의 PAR 설정을 확인하세요.");
                 StartNewTable(null);
             }
             catch (Exception ex)
@@ -1773,6 +1826,12 @@ namespace LcrLogger
                 c.Cv = true;
                 c.CvVolts = v;
             }
+            c.Pars[0] = "LS";   // 스프레드시트 입력 등이 PAR1의 Ls를 기준으로 하므로 고정
+            for (int i = 0; i < cbPar.Length; i++)
+                c.Pars[i + 1] = cbPar[i].SelectedIndex == 0 ? null : (string)cbPar[i].SelectedItem;
+            var chosen = c.Pars.Where(p => p != null && p != "OFF").ToList();
+            if (chosen.Distinct().Count() != chosen.Count)
+                throw new InvalidOperationException("PAR1~PAR4에 같은 파라미터가 두 번 들어갔습니다. 서로 다르게 고르세요 (PAR1은 Ls 고정).");
             string[] speeds = { null, "FAST", "MEDium", "SLOW", "SLOW2" };
             c.Speed = speeds[cbSpeed.SelectedIndex];
             c.Bias = cbBias.SelectedIndex;
@@ -1800,7 +1859,7 @@ namespace LcrLogger
 
         // 연결 확인 절차: *IDN?, LCR 모드 확인, 측정 파라미터 읽기. 결과는 (IDN, PAR1~4)
         // interactive=false(자동 재연결)이면 묻지 않고 LCR 모드로 바꿈 (끊기기 전에 LCR 모드로 쓰던 계측기)
-        async Task<KeyValuePair<string, List<string>>> Handshake(IMeter local, string par1, bool interactive)
+        async Task<KeyValuePair<string, List<string>>> Handshake(IMeter local, MeasCond cond, bool interactive, bool keepOriginal)
         {
             string idn = await Io(() =>
             {
@@ -1837,9 +1896,10 @@ namespace LcrLogger
 
             try
             {
+                // 측정 조건(PAR 포함)을 먼저 보낸 뒤 PAR를 읽어야 표 열이 설정과 맞음
+                await ApplyConditions(local, cond, keepOriginal);
                 var names = await Io(() =>
                 {
-                    if (par1 != null) local.Send(":PAR1 " + par1);
                     var list = new List<string>();
                     for (int i = 1; i <= 4; i++)
                         list.Add(local.Query(":PAR" + i + "?").ToUpperInvariant());
@@ -1979,13 +2039,12 @@ namespace LcrLogger
             {
                 int baud = lostBaud;
                 m = lostDemo ? new DemoMeter() : await Task.Run(() => (IMeter)new SerialMeter(port, baud));
-                var hs = await Handshake(m, connectPar1, false);
+                var hs = await Handshake(m, connectCond, false, savedCond != null);
                 if (gen != reconnectGen || meter != null)
                 {
                     m.Dispose();   // 기다리는 동안 사용자가 취소함
                     return;
                 }
-                await ApplyConditions(m, connectCond, savedCond != null);
                 var newPars = hs.Value.Where(p => p.Length > 0 && p != "OFF").ToList();
                 meter = m;
                 m = null;
@@ -2428,7 +2487,8 @@ namespace LcrLogger
             btnConnect.Enabled = !busy || connected;
             // 재연결을 기다리는 동안에는 끊기기 전 설정 그대로 다시 연결하므로 설정을 잠금
             bool editable = !connected && !busy && !waitingReconnect;
-            cbPort.Enabled = btnRefresh.Enabled = cbBaud.Enabled = chkDemo.Enabled = cbPar1.Enabled = chkMulti.Enabled = editable;
+            cbPort.Enabled = btnRefresh.Enabled = cbBaud.Enabled = chkDemo.Enabled = chkMulti.Enabled = editable;
+            foreach (ComboBox c in cbPar) c.Enabled = editable;
             chkCv.Enabled = txtCv.Enabled = cbSpeed.Enabled = cbBias.Enabled = txtBias.Enabled = editable;
             foreach (TextBox t in txtFreq) t.Enabled = editable;
             chkTrg.Enabled = freqs.Count == 0 || !connected;
@@ -2495,13 +2555,14 @@ namespace LcrLogger
                 Check(responses.Count == 4, "주파수 4개 응답");
                 Check(m.Query(":FREQ?") == freqBefore && m.Query(":TRIG?") == trigBefore, "원래 주파수/트리거 복귀");
                 // 측정 조건: CV + SPEED + DC 바이어스를 보내고, 복원하면 원래 값으로 돌아오는지
-                var cond = new MeasCond { Cv = true, CvVolts = 0.5, Speed = "SLOW2", Bias = 2, BiasVolts = 1.5 };
-                string[] condKeys = { ":LEVel?", ":LEVel:CVOLTage?", ":SPEEd?", ":DCBias?", ":DCBias:LEVel?" };
+                var cond = new MeasCond { Cv = true, CvVolts = 0.5, Speed = "SLOW2", Bias = 2, BiasVolts = 1.5, Pars = new[] { "LS", "Z", "PHASE", "OFF" } };
+                string[] condKeys = { ":LEVel?", ":LEVel:CVOLTage?", ":SPEEd?", ":DCBias?", ":DCBias:LEVel?", ":PARameter1?", ":PARameter2?", ":PARameter3?", ":PARameter4?" };
                 string before = string.Join("|", condKeys.Select(k => m.Query(k)));
                 var original = cond.Read(m);
                 List<string> condLog = cond.Apply(m);
                 Check(m.Query(":LEVel?") == "CV" && m.Query(":SPEEd?") == "SLOW2" && m.Query(":DCBias?") == "ON", "측정 조건 적용");
-                Check(condLog.Count == 3 && condLog.All(l => !l.Contains("※")), "측정 조건 적용 확인 로그");
+                Check(condLog.Count == 4 && condLog.All(l => !l.Contains("※")), "측정 조건 적용 확인 로그");
+                Check(m.Query(":PARameter3?") == "PHASE" && m.Query(":MEAS?").Split(',').Length == 3, "PAR2~4 적용 (측정 응답 3개)");
                 cond.Restore(m, original);
                 Check(string.Join("|", condKeys.Select(k => m.Query(k))) == before, "측정 조건 복원");
                 Check(!new MeasCond().Any && cond.Any, "측정 조건 변경 없음 판별");
