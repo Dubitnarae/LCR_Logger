@@ -27,8 +27,8 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("LCR Logger")]
 [assembly: System.Reflection.AssemblyCompany("KIM YEONGDO")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 KIM YEONGDO")]
-[assembly: System.Reflection.AssemblyVersion("1.4.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.4.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.5.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.5.0.0")]
 
 namespace LcrLogger
 {
@@ -60,11 +60,18 @@ namespace LcrLogger
     // 자동 업데이트 (GitHub Releases의 최신 릴리스에 올린 LCR_Logger.exe로 교체)
     // ------------------------------------------------------------------
 
+    class ReleaseAsset
+    {
+        public string Name, Url, Sha256;
+        public long Size;
+        public bool IsZip { get { return Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase); } }
+    }
+
     class UpdateInfo
     {
         public Version Version;
-        public string Tag, Notes, PageUrl, ExeUrl, Sha256;
-        public long Size;
+        public string Tag, Notes, PageUrl;
+        public ReleaseAsset Asset;   // 배포 zip(우선) 또는 LCR_Logger.exe
     }
 
     static class Updater
@@ -117,18 +124,26 @@ namespace LcrLogger
             };
             info.Version = ParseTag(info.Tag);
             var assets = root.ContainsKey("assets") ? root["assets"] as object[] : null;
+            ReleaseAsset zip = null, exe = null;
             if (assets != null)
             {
                 foreach (var a in assets.OfType<Dictionary<string, object>>())
                 {
-                    if (!string.Equals(a["name"] as string, AssetName, StringComparison.OrdinalIgnoreCase)) continue;
-                    info.ExeUrl = a["browser_download_url"] as string;
-                    info.Size = a.ContainsKey("size") ? Convert.ToInt64(a["size"], CultureInfo.InvariantCulture) : 0;
+                    var asset = new ReleaseAsset
+                    {
+                        Name = a.ContainsKey("name") ? a["name"] as string ?? "" : "",
+                        Url = a.ContainsKey("browser_download_url") ? a["browser_download_url"] as string : null,
+                        Size = a.ContainsKey("size") ? Convert.ToInt64(a["size"], CultureInfo.InvariantCulture) : 0
+                    };
                     string digest = a.ContainsKey("digest") ? a["digest"] as string : null;
                     if (digest != null && digest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase))
-                        info.Sha256 = digest.Substring(7).ToLowerInvariant();
+                        asset.Sha256 = digest.Substring(7).ToLowerInvariant();
+                    if (asset.Url == null) continue;
+                    if (zip == null && asset.IsZip && asset.Name.StartsWith("LCR_Logger", StringComparison.OrdinalIgnoreCase)) zip = asset;
+                    if (string.Equals(asset.Name, AssetName, StringComparison.OrdinalIgnoreCase)) exe = asset;
                 }
             }
+            info.Asset = zip ?? exe;
             return info;
         }
 
@@ -154,33 +169,67 @@ namespace LcrLogger
 
         static string ExePath { get { return Application.ExecutablePath; } }
 
-        // 새 exe를 받아 검사한 뒤 실행 중인 exe와 바꿔 놓는다. (실행 중인 exe는 이름 변경만 가능)
+        // 새 버전을 받아 검사한 뒤 실행 중인 exe와 바꿔 놓는다. (실행 중인 exe는 이름 변경만 가능)
         public static Task DownloadAndReplaceAsync(UpdateInfo info)
         {
             return Task.Run(() =>
             {
-                string exe = ExePath, tmp = exe + ".new", old = exe + ".old";
+                ReleaseAsset asset = info.Asset;
+                string exe = ExePath, dir = Path.GetDirectoryName(exe), tmp = exe + ".new", old = exe + ".old";
                 if (File.Exists(tmp)) File.Delete(tmp);
-                using (var wc = Client()) wc.DownloadFile(info.ExeUrl, tmp);
 
-                byte[] data = File.ReadAllBytes(tmp);
+                byte[] data;
+                using (var wc = Client()) data = wc.DownloadData(asset.Url);
+                if (asset.Size > 0 && data.Length != asset.Size)
+                    throw new InvalidDataException("받은 파일 크기가 다릅니다.");
+                if (asset.Sha256 != null && Sha256Hex(data) != asset.Sha256)
+                    throw new InvalidDataException("받은 파일의 해시가 맞지 않습니다.");
+
+                var docs = new Dictionary<string, byte[]>();
+                if (asset.IsZip)
+                {
+                    byte[] exeBytes = null;
+                    using (var archive = new System.IO.Compression.ZipArchive(new MemoryStream(data), System.IO.Compression.ZipArchiveMode.Read))
+                    {
+                        foreach (var entry in archive.Entries)
+                        {
+                            bool isExe = string.Equals(entry.Name, AssetName, StringComparison.OrdinalIgnoreCase);
+                            bool isDoc = entry.Name.EndsWith(".txt", StringComparison.OrdinalIgnoreCase) && entry.Name.IndexOfAny(Path.GetInvalidFileNameChars()) < 0;
+                            if (!isExe && !isDoc) continue;
+                            using (var s = entry.Open())
+                            using (var ms = new MemoryStream())
+                            {
+                                s.CopyTo(ms);
+                                if (isExe) exeBytes = ms.ToArray(); else docs[entry.Name] = ms.ToArray();
+                            }
+                        }
+                    }
+                    if (exeBytes == null) throw new InvalidDataException("zip 안에 " + AssetName + "이 없습니다.");
+                    data = exeBytes;
+                }
                 if (data.Length < 2 || data[0] != 'M' || data[1] != 'Z')
                     throw new InvalidDataException("받은 파일이 실행 파일이 아닙니다.");
-                if (info.Size > 0 && data.Length != info.Size)
-                    throw new InvalidDataException("받은 파일 크기가 다릅니다.");
-                if (info.Sha256 != null)
-                {
-                    string hash;
-                    using (var sha = System.Security.Cryptography.SHA256.Create())
-                        hash = BitConverter.ToString(sha.ComputeHash(data)).Replace("-", "").ToLowerInvariant();
-                    if (hash != info.Sha256) throw new InvalidDataException("받은 파일의 해시가 맞지 않습니다.");
-                }
 
+                File.WriteAllBytes(tmp, data);
                 if (File.Exists(old)) File.Delete(old);
                 File.Move(exe, old);
                 try { File.Move(tmp, exe); }
                 catch { File.Move(old, exe); throw; }
+
+                // 사용설명서 등 함께 배포한 문서도 새 것으로 (실패해도 업데이트는 유지)
+                foreach (var doc in docs)
+                {
+                    try { File.WriteAllBytes(Path.Combine(dir, doc.Key), doc.Value); }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
             });
+        }
+
+        static string Sha256Hex(byte[] data)
+        {
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+                return BitConverter.ToString(sha.ComputeHash(data)).Replace("-", "").ToLowerInvariant();
         }
 
         public static void Restart()
@@ -685,6 +734,236 @@ namespace LcrLogger
     }
 
     // ------------------------------------------------------------------
+    // 디자인 (밝은 회색 배경 + 둥근 흰 카드 + 파란 강조색)
+    // ------------------------------------------------------------------
+
+    static class Theme
+    {
+        public static readonly Color Bg = Color.FromArgb(245, 245, 247);
+        public static readonly Color Card = Color.White;
+        public static readonly Color Text = Color.FromArgb(29, 29, 31);
+        public static readonly Color Secondary = Color.FromArgb(110, 110, 115);
+        public static readonly Color Separator = Color.FromArgb(222, 222, 227);
+        public static readonly Color Accent = Color.FromArgb(0, 113, 227);
+        public static readonly Color AccentHover = Color.FromArgb(0, 119, 237);
+        public static readonly Color AccentPressed = Color.FromArgb(0, 96, 196);
+        public static readonly Color Fill = Color.FromArgb(232, 232, 237);
+        public static readonly Color FillHover = Color.FromArgb(222, 222, 228);
+        public static readonly Color FillPressed = Color.FromArgb(210, 210, 216);
+        public static readonly Color Green = Color.FromArgb(36, 138, 61);
+        public static readonly Color SwitchOn = Color.FromArgb(52, 199, 89);
+        public static readonly Color Red = Color.FromArgb(215, 0, 21);
+        public static readonly Color Selection = Color.FromArgb(232, 240, 254);
+        public const string FontName = "맑은 고딕";
+        public const string NumberFontName = "Segoe UI";
+
+        public static System.Drawing.Drawing2D.GraphicsPath Rounded(RectangleF r, float radius)
+        {
+            float d = radius * 2;
+            var path = new System.Drawing.Drawing2D.GraphicsPath();
+            path.AddArc(r.X, r.Y, d, d, 180, 90);
+            path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+            path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+
+        public static Color ParentBack(Control c)
+        {
+            return c.Parent != null ? c.Parent.BackColor : Bg;
+        }
+    }
+
+    // 제목이 위에 붙은 둥근 흰 카드
+    class Card : Panel
+    {
+        readonly string title;
+        const int Radius = 12;
+
+        public Card(string title, bool autoSize)
+        {
+            this.title = title;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
+            BackColor = Theme.Bg;
+            Dock = DockStyle.Fill;
+            AutoSize = autoSize;
+            if (autoSize) AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            Margin = new Padding(0, 0, 0, 8);
+            Padding = new Padding(10, title == null ? 8 : 28, 10, 6);
+        }
+
+        // 주어진 너비에서 안쪽 내용이 줄바꿈된 뒤의 높이를 돌려줌 (자동 크기 카드)
+        public override Size GetPreferredSize(Size proposedSize)
+        {
+            int width = proposedSize.Width > 0 && proposedSize.Width < 10000 ? proposedSize.Width : Width;
+            int inner = 0;
+            foreach (Control c in Controls)
+                inner = Math.Max(inner, c.GetPreferredSize(new Size(Math.Max(1, width - Padding.Horizontal), 0)).Height);
+            return new Size(width, inner + Padding.Vertical);
+        }
+
+        int laidOutWidth = -1;
+
+        protected override void OnSizeChanged(EventArgs e)
+        {
+            base.OnSizeChanged(e);
+            // 너비가 바뀌면 줄바꿈이 달라지므로 부모가 높이를 다시 계산하게 함
+            if (AutoSize && Parent != null && Width != laidOutWidth)
+            {
+                laidOutWidth = Width;
+                int want = GetPreferredSize(new Size(Width, 0)).Height;
+                if (want != Height) Parent.PerformLayout();
+            }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.Clear(BackColor);
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            var r = new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f);
+            using (var path = Theme.Rounded(r, Radius))
+            using (var fill = new SolidBrush(Theme.Card))
+            using (var border = new Pen(Theme.Separator))
+            {
+                g.FillPath(fill, path);
+                g.DrawPath(border, path);
+            }
+            if (title != null)
+            {
+                using (var f = new Font(Theme.FontName, 9.5F, FontStyle.Bold))
+                    TextRenderer.DrawText(g, title, f, new Point(14, 8), Theme.Text, Theme.Card);
+            }
+        }
+    }
+
+    // 알약 모양 버튼 (primary = 파란 배경)
+    class PillButton : Button
+    {
+        readonly bool primary;
+        bool hover, pressed;
+
+        public PillButton(bool primary)
+        {
+            this.primary = primary;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            FlatStyle = FlatStyle.Flat;
+            FlatAppearance.BorderSize = 0;
+            Cursor = Cursors.Hand;
+            Margin = new Padding(4, 3, 4, 3);
+            AccessibleRole = AccessibleRole.PushButton;
+        }
+
+        public override Size GetPreferredSize(Size proposedSize)
+        {
+            Size t = TextRenderer.MeasureText(Text, Font);
+            return new Size(t.Width + 28, Math.Max(30, t.Height + 12));
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = pressed = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e) { pressed = true; Invalidate(); base.OnMouseDown(e); }
+        protected override void OnMouseUp(MouseEventArgs e) { pressed = false; Invalidate(); base.OnMouseUp(e); }
+        protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+        protected override void OnTextChanged(EventArgs e) { Invalidate(); base.OnTextChanged(e); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.Clear(Theme.ParentBack(this));
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            Color back, fore;
+            if (!Enabled) { back = primary ? Color.FromArgb(176, 208, 243) : Color.FromArgb(240, 240, 243); fore = primary ? Color.White : Color.FromArgb(175, 175, 180); }
+            else if (primary) { back = pressed ? Theme.AccentPressed : hover ? Theme.AccentHover : Theme.Accent; fore = Color.White; }
+            else { back = pressed ? Theme.FillPressed : hover ? Theme.FillHover : Theme.Fill; fore = Theme.Text; }
+            var r = new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f);
+            using (var path = Theme.Rounded(r, Math.Min(Height / 2f - 1, 15)))
+            using (var b = new SolidBrush(back))
+                g.FillPath(b, path);
+            if (Focused && ShowFocusCues)
+            {
+                using (var path = Theme.Rounded(new RectangleF(1.5f, 1.5f, Width - 3.5f, Height - 3.5f), Math.Min(Height / 2f - 2, 14)))
+                using (var p = new Pen(Color.FromArgb(120, Theme.Accent), 2))
+                    g.DrawPath(p, path);
+            }
+            TextRenderer.DrawText(g, Text, Font, ClientRectangle, fore,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+        }
+    }
+
+    // 체크박스를 토글 스위치 모양으로 그림 (CheckBox 동작은 그대로)
+    class Switch : CheckBox
+    {
+        const int TrackW = 34, TrackH = 20;
+
+        public Switch()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            Cursor = Cursors.Hand;
+            AutoSize = true;
+        }
+
+        // 직접 그리는 컨트롤이라 화면 낭독기/자동화에 체크 상자임을 알려 줌
+        protected override AccessibleObject CreateAccessibilityInstance()
+        {
+            return new SwitchAccessible(this);
+        }
+
+        class SwitchAccessible : ControlAccessibleObject
+        {
+            readonly Switch owner;
+            public SwitchAccessible(Switch owner) : base(owner) { this.owner = owner; }
+            public override AccessibleRole Role { get { return AccessibleRole.CheckButton; } }
+            public override string DefaultAction { get { return owner.Checked ? "선택 취소" : "선택"; } }
+            public override AccessibleStates State
+            {
+                get
+                {
+                    var s = AccessibleStates.Focusable;
+                    if (owner.Checked) s |= AccessibleStates.Checked;
+                    if (!owner.Enabled) s |= AccessibleStates.Unavailable;
+                    if (owner.Focused) s |= AccessibleStates.Focused;
+                    return s;
+                }
+            }
+            public override void DoDefaultAction() { if (owner.Enabled) owner.Checked = !owner.Checked; }
+        }
+
+        public override Size GetPreferredSize(Size proposedSize)
+        {
+            Size t = TextRenderer.MeasureText(Text, Font);
+            return new Size(TrackW + 8 + t.Width + 2, Math.Max(TrackH + 4, t.Height + 4));
+        }
+
+        protected override void OnCheckedChanged(EventArgs e) { Invalidate(); base.OnCheckedChanged(e); }
+        protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            Color back = Theme.ParentBack(this);
+            g.Clear(back);
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            float y = (Height - TrackH) / 2f;
+            Color track = Checked ? Theme.SwitchOn : Color.FromArgb(220, 220, 225);
+            if (!Enabled) track = Color.FromArgb(120, track);
+            using (var path = Theme.Rounded(new RectangleF(1, y, TrackW, TrackH), TrackH / 2f))
+            using (var b = new SolidBrush(track))
+                g.FillPath(b, path);
+            float knob = TrackH - 4;
+            float x = Checked ? 1 + TrackW - knob - 2 : 3;
+            using (var shadow = new SolidBrush(Color.FromArgb(40, 0, 0, 0)))
+                g.FillEllipse(shadow, x, y + 2.6f, knob, knob);
+            using (var k = new SolidBrush(Color.White))
+                g.FillEllipse(k, x, y + 2, knob, knob);
+            var textRect = new Rectangle(TrackW + 9, 0, Width - TrackW - 9, Height);
+            TextRenderer.DrawText(g, Text, Font, textRect, Enabled ? Theme.Text : Theme.Secondary, back,
+                TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.SingleLine);
+        }
+    }
+
+    // ------------------------------------------------------------------
     // 화면
     // ------------------------------------------------------------------
 
@@ -721,10 +1000,12 @@ namespace LcrLogger
         {
             this.justUpdated = justUpdated;
             Text = "LCR Logger " + Updater.CurrentText + " - 인덕턴스 측정 기록";
-            Font = new Font("맑은 고딕", 9F);
+            Font = new Font(Theme.FontName, 9F);
+            BackColor = Theme.Bg;
+            ForeColor = Theme.Text;
             AutoScaleMode = AutoScaleMode.Dpi;
-            ClientSize = new Size(1000, 720);
-            MinimumSize = new Size(820, 560);
+            ClientSize = new Size(1100, Math.Max(620, Math.Min(960, Screen.PrimaryScreen.WorkingArea.Height - 60)));
+            MinimumSize = new Size(860, 620);
             StartPosition = FormStartPosition.CenterScreen;
             BuildUi();
             LoadSettings();
@@ -736,7 +1017,8 @@ namespace LcrLogger
 
         void BuildUi()
         {
-            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(8) };
+            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(14, 12, 14, 10), BackColor = Theme.Bg };
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // 카드가 창 너비에 맞춰 줄바꿈되도록
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -745,7 +1027,7 @@ namespace LcrLogger
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 110));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 96));
             Controls.Add(layout);
 
             // 1. 연결
@@ -755,10 +1037,10 @@ namespace LcrLogger
             cbBaud = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 80 };
             cbBaud.Items.AddRange(new object[] { "9600", "19200", "38400", "57600", "115200" });
             cbBaud.SelectedIndex = 0;
-            chkDemo = new CheckBox { Text = "데모 모드(계측기 없이 시험)", AutoSize = true, Margin = new Padding(8, 6, 3, 3) };
-            btnConnect = Btn("연결", OnConnect);
+            chkDemo = new Switch { Text = "데모 모드(계측기 없이 시험)", Margin = new Padding(12, 4, 3, 3) };
+            btnConnect = Btn("연결", OnConnect, true);
             btnConnect.Width = 90;
-            lblModel = new Label { AutoSize = true, Margin = new Padding(8, 7, 3, 3), ForeColor = Color.DimGray, Text = "연결 안 됨" };
+            lblModel = new Label { AutoSize = true, Margin = new Padding(8, 9, 3, 3), ForeColor = Theme.Secondary, Text = "연결 안 됨" };
             Add(conn, Lbl("COM 포트"), cbPort, btnRefresh, Lbl("속도(USB는 무관)"), cbBaud, chkDemo, btnConnect, lblModel);
             layout.Controls.Add(conn.Parent);
 
@@ -772,21 +1054,23 @@ namespace LcrLogger
             cbUnit.SelectedIndex = unitIndex;
             cbUnit.SelectedIndexChanged += OnUnitChanged;
             txtMemo = new TextBox { Width = 150 };
-            btnMeasure = Btn("측정 (Enter)", async delegate { await MeasureOnce(); });
+            btnMeasure = Btn("측정 (Enter)", async delegate { await MeasureOnce(); }, true);
             btnMeasure.Width = 110;
-            chkTrg = new CheckBox { Text = "누를 때마다 새로 측정(계측기 EXT 트리거)", AutoSize = true, Margin = new Padding(8, 6, 3, 3) };
+            chkTrg = new Switch { Text = "누를 때마다 새로 측정(계측기 EXT 트리거)", Margin = new Padding(12, 4, 3, 3) };
             numInterval = new NumericUpDown { Width = 60, DecimalPlaces = 1, Minimum = 0.2M, Maximum = 3600, Value = 1, Increment = 0.5M };
             numCount = new NumericUpDown { Width = 60, Minimum = 0, Maximum = 100000, Value = 10 };
             btnAuto = Btn("연속 측정 시작", OnAuto);
             btnAuto.Width = 120;
             Add(meas, Lbl("연결 시 PAR1"), cbPar1, Lbl("L 단위"), cbUnit, Lbl("메모"), txtMemo, btnMeasure, chkTrg,
                 Lbl("간격(초)"), numInterval, Lbl("횟수(0=무한)"), numCount, btnAuto);
+            meas.SetFlowBreak(chkTrg, true);
             layout.Controls.Add(meas.Parent);
 
             // 다중 주파수: LCR 모드에서 주파수를 바꿔 가며 한 번에 측정 (연속 측정 모드 대신)
             var multi = Group("다중 주파수 측정 (연결 전에 설정)");
-            chkMulti = new CheckBox { Text = "사용 - 측정 한 번에 아래 주파수를 차례로 측정해 한 행에 기록", AutoSize = true, Margin = new Padding(3, 6, 8, 3) };
+            chkMulti = new Switch { Text = "사용 - 측정 한 번에 아래 주파수를 차례로 측정해 한 행에 기록", Margin = new Padding(3, 4, 8, 3) };
             multi.Controls.Add(chkMulti);
+            multi.SetFlowBreak(chkMulti, true);
             txtFreq = new TextBox[4];
             string[] defaults = { "1k", "100k", "200k", "1M" };
             for (int i = 0; i < txtFreq.Length; i++)
@@ -794,7 +1078,9 @@ namespace LcrLogger
                 txtFreq[i] = new TextBox { Width = 70, Text = defaults[i] };
                 Add(multi, Lbl("주파수" + (i + 1)), txtFreq[i]);
             }
-            Add(multi, Lbl("(Hz, 예: 120, 1k, 100k, 1M / 빈칸은 건너뜀)"));
+            var hint = Lbl("Hz · 예: 120, 1k, 100k, 1M · 빈칸은 건너뜀");
+            hint.ForeColor = Theme.Secondary;
+            Add(multi, hint);
             layout.Controls.Add(multi.Parent);
 
             // 3. 저장
@@ -806,13 +1092,13 @@ namespace LcrLogger
             btnExport = Btn("다른 이름으로 저장", OnExport);
             btnExport.Width = 130;
             btnClear = Btn("표 비우기", delegate { StartNewTable("표를 비웠습니다."); });
-            lblFile = new Label { AutoSize = true, Margin = new Padding(8, 7, 3, 3), ForeColor = Color.DimGray };
+            lblFile = new Label { AutoSize = true, Margin = new Padding(8, 9, 3, 3), ForeColor = Theme.Secondary };
             Add(save, Lbl("저장 폴더"), txtFolder, btnFolder, btnOpenFolder, btnNewFile, btnExport, btnClear, lblFile);
             layout.Controls.Add(save.Parent);
 
             // 4. 스프레드시트 셀에 바로 입력
             var sheet = Group("4. 스프레드시트에 바로 입력 (엑셀, 구글 시트 등)");
-            chkSheet = new CheckBox { Text = "사용 - 셀을 선택하고", AutoSize = true, Margin = new Padding(3, 6, 0, 3) };
+            chkSheet = new Switch { Text = "사용 - 셀을 선택하고", Margin = new Padding(3, 4, 0, 3) };
             cbHotkey = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 55 };
             cbHotkey.Items.AddRange(HotkeyChoices.Select(k => (object)k.ToString()).ToArray());
             cbHotkey.SelectedIndex = 3;
@@ -831,15 +1117,17 @@ namespace LcrLogger
                 Lbl("값 사이"), cbSheetSep, Lbl("입력 후"), cbSheetEnd);
             layout.Controls.Add(sheet.Parent);
 
+            var last = Group("최근 측정값");
             lblLast = new Label
             {
                 AutoSize = true,
-                Font = new Font("맑은 고딕", 16F, FontStyle.Bold),
-                ForeColor = Color.FromArgb(20, 70, 140),
-                Margin = new Padding(3, 6, 3, 6),
+                Font = new Font(Theme.NumberFontName, 18F, FontStyle.Regular),
+                ForeColor = Theme.Text,
+                Margin = new Padding(3, 0, 3, 2),
                 Text = "-"
             };
-            layout.Controls.Add(lblLast);
+            last.Controls.Add(lblLast);
+            layout.Controls.Add(last.Parent);
 
             grid = new DataGridView
             {
@@ -847,24 +1135,46 @@ namespace LcrLogger
                 ReadOnly = true,
                 AllowUserToAddRows = false,
                 AllowUserToDeleteRows = false,
+                AllowUserToResizeRows = false,
                 RowHeadersVisible = false,
                 SelectionMode = DataGridViewSelectionMode.FullRowSelect,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-                BackgroundColor = SystemColors.Window
+                BackgroundColor = Theme.Card,
+                BorderStyle = BorderStyle.None,
+                CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal,
+                ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None,
+                GridColor = Theme.Separator,
+                EnableHeadersVisualStyles = false,
+                ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
+                ColumnHeadersHeight = 32
             };
-            layout.Controls.Add(grid);
+            grid.RowTemplate.Height = 28;
+            grid.ColumnHeadersDefaultCellStyle.BackColor = Theme.Card;
+            grid.ColumnHeadersDefaultCellStyle.ForeColor = Theme.Secondary;
+            grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = Theme.Card;
+            grid.ColumnHeadersDefaultCellStyle.Font = new Font(Theme.FontName, 8.5F, FontStyle.Bold);
+            grid.ColumnHeadersDefaultCellStyle.Padding = new Padding(4, 0, 0, 0);
+            grid.ColumnHeadersDefaultCellStyle.WrapMode = DataGridViewTriState.False;
+            grid.DefaultCellStyle.BackColor = Theme.Card;
+            grid.DefaultCellStyle.ForeColor = Theme.Text;
+            grid.DefaultCellStyle.SelectionBackColor = Theme.Selection;
+            grid.DefaultCellStyle.SelectionForeColor = Theme.Text;
+            grid.DefaultCellStyle.Padding = new Padding(4, 0, 0, 0);
+            var gridCard = new Card(null, false) { Padding = new Padding(10, 8, 10, 10) };
+            gridCard.Controls.Add(grid);
+            layout.Controls.Add(gridCard);
 
-            var cmdRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false };
+            var cmdRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false, BackColor = Theme.Bg, Margin = new Padding(0, 0, 0, 6) };
             txtCmd = new TextBox { Width = 300 };
             txtCmd.KeyDown += (s, e) =>
             {
                 if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; OnSendCommand(s, e); }
             };
             btnSend = Btn("명령 전송", OnSendCommand);
-            chkAutoUpdate = new CheckBox { Text = "시작할 때 업데이트 확인", AutoSize = true, Margin = new Padding(20, 6, 3, 3) };
+            chkAutoUpdate = new Switch { Text = "시작할 때 업데이트 확인", Margin = new Padding(20, 4, 3, 3) };
             btnUpdate = Btn("업데이트 확인", async delegate { await CheckUpdate(false); });
             var btnAbout = Btn("정보", OnAbout);
-            var lblDev = new Label { AutoSize = true, Margin = new Padding(12, 7, 3, 3), ForeColor = Color.DimGray, Text = "개발자: " + Updater.Developer };
+            var lblDev = new Label { AutoSize = true, Margin = new Padding(12, 9, 3, 3), ForeColor = Theme.Secondary, Text = "개발자: " + Updater.Developer };
             cmdRow.Controls.AddRange(new Control[] { Lbl("직접 명령(예: :FREQ?)"), txtCmd, btnSend, chkAutoUpdate, btnUpdate, btnAbout, lblDev });
             layout.Controls.Add(cmdRow);
 
@@ -875,10 +1185,15 @@ namespace LcrLogger
                 ReadOnly = true,
                 ScrollBars = ScrollBars.Vertical,
                 Font = new Font("Consolas", 9F),
-                BackColor = SystemColors.Window
+                BackColor = Theme.Card,
+                ForeColor = Theme.Secondary,
+                BorderStyle = BorderStyle.None
             };
-            layout.Controls.Add(txtLog);
+            var logCard = new Card(null, false) { Padding = new Padding(12, 8, 6, 8), Margin = new Padding(0) };
+            logCard.Controls.Add(txtLog);
+            layout.Controls.Add(logCard);
 
+            StyleInputs(layout);
             AcceptButton = btnMeasure;
             FormClosing += delegate
             {
@@ -928,7 +1243,7 @@ namespace LcrLogger
                     return;
                 }
                 Log("새 버전이 있습니다: " + info.Tag);
-                if (info.ExeUrl == null)
+                if (info.Asset == null)
                 {
                     if (!quiet) MessageBox.Show(this, "새 버전 " + info.Tag + "이 있지만 내려받을 파일이 없습니다.\n" + info.PageUrl, "업데이트", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
@@ -1019,9 +1334,9 @@ namespace LcrLogger
 
         static FlowLayoutPanel Group(string title)
         {
-            var box = new GroupBox { Text = title, Dock = DockStyle.Fill, AutoSize = true, Padding = new Padding(6, 4, 6, 4) };
-            var flow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true };
-            box.Controls.Add(flow);
+            var card = new Card(title, true);
+            var flow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true, BackColor = Theme.Card };
+            card.Controls.Add(flow);
             return flow;
         }
 
@@ -1032,14 +1347,46 @@ namespace LcrLogger
 
         static Label Lbl(string text)
         {
-            return new Label { Text = text, AutoSize = true, Margin = new Padding(8, 7, 0, 3) };
+            return new Label { Text = text, AutoSize = true, Margin = new Padding(10, 9, 0, 3), ForeColor = Theme.Text };
         }
 
-        static Button Btn(string text, EventHandler onClick)
+        static Button Btn(string text, EventHandler onClick, bool primary = false)
         {
-            var b = new Button { Text = text, AutoSize = true, Height = 26 };
+            var b = new PillButton(primary) { Text = text, AutoSize = true };
             b.Click += onClick;
             return b;
+        }
+
+        // 입력 칸을 평평한 모양으로
+        static void StyleInputs(Control parent)
+        {
+            foreach (Control c in parent.Controls)
+            {
+                var combo = c as ComboBox;
+                var text = c as TextBox;
+                var num = c as NumericUpDown;
+                if (combo != null) { combo.FlatStyle = FlatStyle.Flat; combo.BackColor = Theme.Card; combo.Margin = new Padding(4, 5, 4, 3); }
+                else if (text != null && text.BorderStyle == BorderStyle.Fixed3D) { text.BorderStyle = BorderStyle.FixedSingle; text.Margin = new Padding(4, 5, 4, 3); }
+                else if (num != null) { num.BorderStyle = BorderStyle.FixedSingle; num.Margin = new Padding(4, 5, 4, 3); }
+                StyleInputs(c);
+            }
+        }
+
+        // Windows 11: 제목 표시줄을 배경색과 같게 (지원하지 않으면 무시)
+        [DllImport("dwmapi.dll")]
+        static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            try
+            {
+                int caption = ColorTranslator.ToWin32(Theme.Bg), text = ColorTranslator.ToWin32(Theme.Text);
+                DwmSetWindowAttribute(Handle, 35, ref caption, 4);   // DWMWA_CAPTION_COLOR
+                DwmSetWindowAttribute(Handle, 36, ref text, 4);      // DWMWA_TEXT_COLOR
+            }
+            catch (DllNotFoundException) { }
+            catch (EntryPointNotFoundException) { }
         }
 
         // ---------------- 연결 ----------------
@@ -1155,7 +1502,7 @@ namespace LcrLogger
                 freqs = newFreqs;
                 freqLabels = freqs.Select(Fmt.FrequencyLabel).ToList();
                 lblModel.Text = idn;
-                lblModel.ForeColor = Color.DarkGreen;
+                lblModel.ForeColor = Theme.Green;
                 Log("연결됨: " + idn);
                 Log("측정 파라미터: " + string.Join(", ", names));
                 if (freqs.Count > 0)
@@ -1186,7 +1533,7 @@ namespace LcrLogger
                 meter = null;
             }
             lblModel.Text = "연결 안 됨";
-            lblModel.ForeColor = Color.DimGray;
+            lblModel.ForeColor = Theme.Secondary;
         }
 
         Task<T> Io<T>(Func<T> work)
@@ -1306,12 +1653,12 @@ namespace LcrLogger
                 }
                 csv.Append(row);
                 lblFile.Text = Path.GetFileName(csv.FilePath) + " (" + rows.Count + "행)";
-                lblFile.ForeColor = Color.DimGray;
+                lblFile.ForeColor = Theme.Secondary;
             }
             catch (Exception ex)
             {
                 lblFile.Text = "저장 대기 " + csv.PendingCount + "행 - 파일이 열려 있는지 확인";
-                lblFile.ForeColor = Color.Firebrick;
+                lblFile.ForeColor = Theme.Red;
                 Log("CSV 기록 실패(다음 측정 때 다시 시도): " + ex.Message);
             }
         }
@@ -1436,6 +1783,7 @@ namespace LcrLogger
                 grid.Columns[c].SortMode = DataGridViewColumnSortMode.NotSortable;
             }
             grid.Columns[0].FillWeight = 30;
+            grid.Columns[0].MinimumWidth = 44;
             grid.Columns[1].FillWeight = 110;
         }
 
@@ -1447,7 +1795,7 @@ namespace LcrLogger
             SetupColumns();
             lblLast.Text = "-";
             lblFile.Text = "다음 측정 시 새 파일 생성";
-            lblFile.ForeColor = Color.DimGray;
+            lblFile.ForeColor = Theme.Secondary;
             if (message != null) Log(message);
         }
 
@@ -1652,7 +2000,11 @@ namespace LcrLogger
                 var rel = Updater.Parse("{\"tag_name\":\"v1.5\",\"html_url\":\"https://github.com/x/y/releases/tag/v1.5\",\"body\":\"수정\",\"assets\":[" +
                     "{\"name\":\"LCR_Logger_v1.5.zip\",\"browser_download_url\":\"https://e/zip\",\"size\":10}," +
                     "{\"name\":\"LCR_Logger.exe\",\"browser_download_url\":\"https://e/exe\",\"size\":54272,\"digest\":\"sha256:ABCDEF\"}]}");
-                Check(rel.ExeUrl == "https://e/exe" && rel.Size == 54272 && rel.Sha256 == "abcdef" && rel.Version == new Version(1, 5, 0), "릴리스 정보 해석");
+                Check(rel.Asset.Url == "https://e/zip" && rel.Asset.IsZip && rel.Version == new Version(1, 5, 0), "릴리스 정보 해석 (zip 우선)");
+                var exeOnly = Updater.Parse("{\"tag_name\":\"v1.5\",\"assets\":[" +
+                    "{\"name\":\"LCR_Logger.exe\",\"browser_download_url\":\"https://e/exe\",\"size\":54272,\"digest\":\"sha256:ABCDEF\"}]}");
+                Check(exeOnly.Asset.Url == "https://e/exe" && exeOnly.Asset.Size == 54272 && exeOnly.Asset.Sha256 == "abcdef", "릴리스 정보 해석 (exe만)");
+                Check(Updater.Parse("{\"tag_name\":\"v1.5\",\"assets\":[]}").Asset == null, "첨부 파일 없는 릴리스");
                 output.AppendLine("SELFTEST OK");
                 Print(output.ToString());
                 return 0;
