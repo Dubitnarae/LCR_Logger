@@ -27,8 +27,8 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("LCR Logger")]
 [assembly: System.Reflection.AssemblyCompany("KIM YEONGDO")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 KIM YEONGDO")]
-[assembly: System.Reflection.AssemblyVersion("1.7.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.7.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.8.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.8.0.0")]
 
 namespace LcrLogger
 {
@@ -319,12 +319,102 @@ namespace LcrLogger
         }
     }
 
+    // 연결할 때 계측기에 보내는 측정 조건 (꺼짐/null = 변경 안 함). 연결을 해제하면 바꾼 항목만 원래 값으로 되돌림
+    class MeasCond
+    {
+        public bool Cv;            // 측정 신호를 정전압(CV)으로
+        public double CvVolts;
+        public string Speed;       // FAST / MEDium / SLOW / SLOW2
+        public int Bias;           // 0 변경 안 함, 1 OFF, 2 ON
+        public double BiasVolts;
+
+        public bool Any { get { return Cv || Speed != null || Bias != 0; } }
+
+        static string Volts(double v, string format)
+        {
+            return v.ToString(format, CultureInfo.InvariantCulture);
+        }
+
+        // 바꾸기 전 값을 읽어 둠 (바꿀 항목만)
+        public Dictionary<string, string> Read(IMeter m)
+        {
+            var s = new Dictionary<string, string>();
+            if (Cv)
+            {
+                s[":LEVel"] = m.Query(":LEVel?");
+                s[":LEVel:CVOLTage"] = m.Query(":LEVel:CVOLTage?");
+            }
+            if (Speed != null) s[":SPEEd"] = m.Query(":SPEEd?");
+            if (Bias != 0) s[":DCBias"] = m.Query(":DCBias?");
+            if (Bias == 2) s[":DCBias:LEVel"] = m.Query(":DCBias:LEVel?");
+            return s;
+        }
+
+        // 설정을 보내고 계측기가 실제로 받은 값을 읽어 로그용 문장으로 돌려줌
+        public List<string> Apply(IMeter m)
+        {
+            var log = new List<string>();
+            if (Cv)
+            {
+                m.Send(":LEVel:CVOLTage " + Volts(CvVolts, "0.000"));
+                m.Send(":LEVel CV");
+                string mode = m.Query(":LEVel?").ToUpperInvariant(), v = m.Query(":LEVel:CVOLTage?");
+                log.Add("측정 조건: 정전압 CV " + v + " V" + (Matches(mode == "CV", v, CvVolts) ? "" : "  ※ 계측기가 값을 받지 않았습니다. 허용 범위를 확인하세요."));
+            }
+            if (Speed != null)
+            {
+                m.Send(":SPEEd " + Speed);
+                string got = m.Query(":SPEEd?");
+                string wanted = Speed.ToUpperInvariant();
+                if (wanted == "MEDIUM" || wanted == "MED") wanted = "MEDIUM";
+                log.Add("측정 조건: SPEED " + got + (got.ToUpperInvariant() == wanted ? "" : "  ※ 계측기가 값을 받지 않았습니다."));
+            }
+            if (Bias == 2)
+            {
+                m.Send(":DCBias:LEVel " + Volts(BiasVolts, "0.00"));
+                m.Send(":DCBias ON");
+                string on = m.Query(":DCBias?").ToUpperInvariant(), v = m.Query(":DCBias:LEVel?");
+                log.Add("측정 조건: DC 바이어스 " + on + " " + v + " V" + (Matches(on == "ON", v, BiasVolts) ? "" : "  ※ 계측기가 값을 받지 않았습니다. 허용 범위를 확인하세요."));
+            }
+            else if (Bias == 1)
+            {
+                m.Send(":DCBias OFF");
+                log.Add("측정 조건: DC 바이어스 " + m.Query(":DCBias?"));
+            }
+            return log;
+        }
+
+        static bool Matches(bool modeOk, string response, double wanted)
+        {
+            double got;
+            return modeOk && Fmt.TryParse(response, out got) && Math.Abs(got - wanted) < 0.0005;
+        }
+
+        // Read로 읽어 둔 값을 되돌림 (Apply의 반대 순서)
+        public void Restore(IMeter m, Dictionary<string, string> s)
+        {
+            string v;
+            if (Bias != 0)
+            {
+                if (Bias == 2 && s.TryGetValue(":DCBias:LEVel", out v) && v.Length > 0) m.Send(":DCBias:LEVel " + v);
+                if (s.TryGetValue(":DCBias", out v) && v.Length > 0) m.Send(":DCBias " + v);
+            }
+            if (Speed != null && s.TryGetValue(":SPEEd", out v) && v.Length > 0) m.Send(":SPEEd " + v);
+            if (Cv)
+            {
+                if (s.TryGetValue(":LEVel:CVOLTage", out v) && v.Length > 0) m.Send(":LEVel:CVOLTage " + v);
+                if (s.TryGetValue(":LEVel", out v) && v.Length > 0) m.Send(":LEVel " + v);
+            }
+        }
+    }
+
     // 계측기 없이 화면/저장 기능을 확인하기 위한 가상 계측기
     class DemoMeter : IMeter
     {
         readonly Random rnd = new Random();
         double freq = 1000;
         string trig = "INT";
+        string level = "V", cvolt = "1.000", speed = "MEDIUM", dcbias = "OFF", dclevel = "0.00";
 
         // 직접 명령 ":DEMO:UNPLUG" → 5초 동안 USB가 빠진 것처럼 동작 (자동 재연결 시험용)
         internal static DateTime UnpluggedUntil = DateTime.MinValue;
@@ -342,6 +432,11 @@ namespace LcrLogger
             double v;
             if (c.StartsWith(":FREQ ") && Fmt.TryParse(c.Substring(6), out v)) freq = v;
             if (c.StartsWith(":TRIG ")) trig = c.Substring(6);
+            if (c.StartsWith(":LEVEL:CVOLTAGE ")) cvolt = c.Substring(16);
+            else if (c.StartsWith(":LEVEL ")) level = c.Substring(7);
+            if (c.StartsWith(":SPEED ")) speed = c.Substring(7) == "MED" ? "MEDIUM" : c.Substring(7);
+            if (c.StartsWith(":DCBIAS:LEVEL ")) dclevel = c.Substring(14);
+            else if (c.StartsWith(":DCBIAS ")) dcbias = c.Substring(8);
         }
 
         public string Query(string command)
@@ -353,6 +448,11 @@ namespace LcrLogger
             if (c == ":MODE?") return "LCR";
             if (c == ":FREQ?") return freq.ToString("0.0000E+00", CultureInfo.InvariantCulture);
             if (c == ":TRIG?") return trig;
+            if (c == ":LEVEL?") return level;
+            if (c == ":LEVEL:CVOLTAGE?") return cvolt;
+            if (c == ":SPEED?") return speed;
+            if (c == ":DCBIAS?") return dcbias;
+            if (c == ":DCBIAS:LEVEL?") return dclevel;
             if (c == ":PAR1?") return "LS";
             if (c == ":PAR2?") return "Q";
             if (c == ":PAR3?" || c == ":PAR4?") return "OFF";
@@ -1076,7 +1176,11 @@ namespace LcrLogger
 
     class MainForm : Form
     {
-        ComboBox cbPort, cbBaud, cbPar1, cbUnit;
+        ComboBox cbPort, cbBaud, cbPar1, cbUnit, cbSpeed, cbBias;
+        CheckBox chkCv;
+        TextBox txtCv, txtBias;
+        MeasCond connectCond;                       // 연결할 때 적용한 측정 조건 (재연결 때 다시 보냄)
+        Dictionary<string, string> savedCond;       // 바꾸기 전 계측기 값 (연결 해제할 때 복원)
         Button btnRefresh, btnConnect, btnMeasure, btnAuto, btnFolder, btnOpenFolder, btnNewFile, btnExport, btnClear, btnSend, btnUpdate;
         CheckBox chkDemo, chkTrg, chkMulti, chkSheet, chkAutoUpdate, chkReconnect;
         Label lblRepeat;
@@ -1145,6 +1249,7 @@ namespace LcrLogger
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 96));
@@ -1203,6 +1308,22 @@ namespace LcrLogger
             hint.ForeColor = Theme.Secondary;
             Add(multi, hint);
             layout.Controls.Add(multi.Parent);
+
+            // 측정 조건: 연결할 때 보내고, 연결을 해제하면 원래 값으로 복원. 모든 주파수에 같은 조건 적용
+            var cond = Group("측정 조건 (연결 전에 설정 · 연결 해제하면 계측기 값을 원래대로 복원)");
+            chkCv = new Switch { Text = "정전압(CV)", Margin = new Padding(3, 4, 0, 3) };
+            txtCv = new TextBox { Width = 60, Text = "1.000" };
+            cbSpeed = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 100 };
+            cbSpeed.Items.AddRange(new object[] { "변경 안 함", "FAST", "MED", "SLOW", "SLOW2" });
+            cbSpeed.SelectedIndex = 0;
+            cbBias = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 100 };
+            cbBias.Items.AddRange(new object[] { "변경 안 함", "OFF", "ON" });
+            cbBias.SelectedIndex = 0;
+            txtBias = new TextBox { Width = 60, Text = "0.00" };
+            var condHint = Lbl("CV 0.005~5 V · DC 바이어스 0~2.5 V · 계측기가 받은 값은 로그에 표시");
+            condHint.ForeColor = Theme.Secondary;
+            Add(cond, chkCv, txtCv, Lbl("V"), Lbl("SPEED"), cbSpeed, Lbl("DC 바이어스"), cbBias, txtBias, Lbl("V"), condHint);
+            layout.Controls.Add(cond.Parent);
 
             // 3. 저장
             var save = Group("3. 저장 (측정할 때마다 CSV에 자동 기록)");
@@ -1326,7 +1447,7 @@ namespace LcrLogger
                 waitingReconnect = false;
                 reconnectGen++;
                 UnregisterHotkeys();
-                CloseMeter();
+                CloseMeter(true);
                 SaveSettings();
             };
             watchTimer.Tick += OnWatchTick;
@@ -1388,7 +1509,7 @@ namespace LcrLogger
                     return;
 
                 autoRunning = false;
-                CloseMeter();
+                CloseMeter(true);
                 UpdateUi();
                 Log("새 버전을 내려받는 중...");
                 try { await Updater.DownloadAndReplaceAsync(info); }
@@ -1430,6 +1551,11 @@ namespace LcrLogger
             string[] savedFreqs = settings.Get("Freqs", "").Split(';');
             if (savedFreqs.Length == txtFreq.Length)
                 for (int i = 0; i < txtFreq.Length; i++) txtFreq[i].Text = savedFreqs[i];
+            chkCv.Checked = settings.Get("CondCv", "0") == "1";
+            txtCv.Text = settings.Get("CvVolts", txtCv.Text);
+            cbSpeed.SelectedIndex = settings.GetInt("CondSpeed", 0, 0, cbSpeed.Items.Count - 1);
+            cbBias.SelectedIndex = settings.GetInt("CondBias", 0, 0, cbBias.Items.Count - 1);
+            txtBias.Text = settings.Get("BiasVolts", txtBias.Text);
             cbHotkey.SelectedIndex = settings.GetInt("SheetHotkey", 3, 0, HotkeyChoices.Length - 1);
             cbSheetValues.SelectedIndex = settings.GetInt("SheetValues", 0, 0, 1);
             cbSheetSep.SelectedIndex = settings.GetInt("SheetSep", 0, 0, 1);
@@ -1450,6 +1576,11 @@ namespace LcrLogger
             settings.Set("IntervalMs", ((int)(numInterval.Value * 1000)).ToString(CultureInfo.InvariantCulture));
             settings.Set("Count", ((int)numCount.Value).ToString(CultureInfo.InvariantCulture));
             settings.Set("MultiFreq", chkMulti.Checked ? "1" : "0");
+            settings.Set("CondCv", chkCv.Checked ? "1" : "0");
+            settings.Set("CvVolts", txtCv.Text.Trim());
+            settings.Set("CondSpeed", cbSpeed.SelectedIndex.ToString(CultureInfo.InvariantCulture));
+            settings.Set("CondBias", cbBias.SelectedIndex.ToString(CultureInfo.InvariantCulture));
+            settings.Set("BiasVolts", txtBias.Text.Trim());
             settings.Set("SheetHotkey", cbHotkey.SelectedIndex.ToString(CultureInfo.InvariantCulture));
             settings.Set("SheetValues", cbSheetValues.SelectedIndex.ToString(CultureInfo.InvariantCulture));
             settings.Set("SheetSep", cbSheetSep.SelectedIndex.ToString(CultureInfo.InvariantCulture));
@@ -1556,7 +1687,7 @@ namespace LcrLogger
             if (meter != null)
             {
                 autoRunning = false;
-                CloseMeter();
+                CloseMeter(true);
                 Log("연결 해제.");
                 UpdateUi();
                 return;
@@ -1594,12 +1725,16 @@ namespace LcrLogger
                 }
 
                 string par1 = cbPar1.SelectedIndex > 0 ? (string)cbPar1.SelectedItem : null;
+                MeasCond cond = ReadCond();
                 var hs = await Handshake(m, par1, true);
                 string idn = hs.Key;
                 List<string> names = hs.Value;
+                savedCond = null;
+                await ApplyConditions(m, cond, false);
 
                 meter = m;
                 connectPar1 = par1;
+                connectCond = cond;
                 pars = names.Where(p => p.Length > 0 && p != "OFF").ToList();
                 freqs = newFreqs;
                 freqLabels = freqs.Select(Fmt.FrequencyLabel).ToList();
@@ -1624,6 +1759,43 @@ namespace LcrLogger
                 busy = false;
                 UpdateUi();
             }
+        }
+
+        // 화면의 측정 조건을 읽음. 잘못된 입력이면 연결 전에 알려 줌
+        MeasCond ReadCond()
+        {
+            var c = new MeasCond();
+            if (chkCv.Checked)
+            {
+                double v;
+                if (!Fmt.TryParse(txtCv.Text.Trim(), out v) || v < 0.005 || v > 5)
+                    throw new InvalidOperationException("정전압(CV) 값 '" + txtCv.Text + "'를 읽을 수 없습니다. 0.005 ~ 5 V 범위로 입력하세요 (예: 1).");
+                c.Cv = true;
+                c.CvVolts = v;
+            }
+            string[] speeds = { null, "FAST", "MEDium", "SLOW", "SLOW2" };
+            c.Speed = speeds[cbSpeed.SelectedIndex];
+            c.Bias = cbBias.SelectedIndex;
+            if (c.Bias == 2)
+            {
+                double v;
+                if (!Fmt.TryParse(txtBias.Text.Trim(), out v) || v < 0 || v > 2.5)
+                    throw new InvalidOperationException("DC 바이어스 값 '" + txtBias.Text + "'를 읽을 수 없습니다. 0 ~ 2.5 V 범위로 입력하세요 (예: 1.5).");
+                c.BiasVolts = v;
+            }
+            return c;
+        }
+
+        // 측정 조건을 계측기에 보냄. keepOriginal=true(자동 재연결)면 처음 읽어 둔 원래 값을 유지
+        async Task ApplyConditions(IMeter m, MeasCond cond, bool keepOriginal)
+        {
+            if (cond == null || !cond.Any) return;
+            List<string> lines = await Io(() =>
+            {
+                if (!keepOriginal) savedCond = cond.Read(m);
+                return cond.Apply(m);
+            });
+            foreach (string line in lines) Log(line);
         }
 
         // 연결 확인 절차: *IDN?, LCR 모드 확인, 측정 파라미터 읽기. 결과는 (IDN, PAR1~4)
@@ -1681,11 +1853,22 @@ namespace LcrLogger
             }
         }
 
-        void CloseMeter()
+        // restore=true(사용자가 해제/종료)면 바꿨던 측정 조건을 원래대로 되돌린 뒤 닫음. 통신이 끊긴 경우는 false
+        void CloseMeter(bool restore = false)
         {
             if (meter == null) return;
             lock (ioLock)
             {
+                if (restore && savedCond != null && connectCond != null)
+                {
+                    try
+                    {
+                        connectCond.Restore(meter, savedCond);
+                        Log("측정 조건을 원래대로 복원했습니다.");
+                    }
+                    catch (Exception ex) { Log("측정 조건 복원 실패: " + ex.Message); }
+                    savedCond = null;
+                }
                 try { meter.Dispose(); }
                 catch (IOException) { }
                 catch (UnauthorizedAccessException) { }
@@ -1745,6 +1928,7 @@ namespace LcrLogger
         {
             waitingReconnect = false;
             reconnectGen++;
+            savedCond = null;   // 통신이 끊긴 상태라 복원할 수 없음
             lblModel.Text = "연결 안 됨";
             lblModel.ForeColor = Theme.Secondary;
         }
@@ -1801,6 +1985,7 @@ namespace LcrLogger
                     m.Dispose();   // 기다리는 동안 사용자가 취소함
                     return;
                 }
+                await ApplyConditions(m, connectCond, savedCond != null);
                 var newPars = hs.Value.Where(p => p.Length > 0 && p != "OFF").ToList();
                 meter = m;
                 m = null;
@@ -2244,6 +2429,7 @@ namespace LcrLogger
             // 재연결을 기다리는 동안에는 끊기기 전 설정 그대로 다시 연결하므로 설정을 잠금
             bool editable = !connected && !busy && !waitingReconnect;
             cbPort.Enabled = btnRefresh.Enabled = cbBaud.Enabled = chkDemo.Enabled = cbPar1.Enabled = chkMulti.Enabled = editable;
+            chkCv.Enabled = txtCv.Enabled = cbSpeed.Enabled = cbBias.Enabled = txtBias.Enabled = editable;
             foreach (TextBox t in txtFreq) t.Enabled = editable;
             chkTrg.Enabled = freqs.Count == 0 || !connected;
             btnMeasure.Enabled = connected && !busy && !autoRunning;
@@ -2308,6 +2494,18 @@ namespace LcrLogger
                 List<string> responses = MainForm.MeasureFrequencies(m, hzList);
                 Check(responses.Count == 4, "주파수 4개 응답");
                 Check(m.Query(":FREQ?") == freqBefore && m.Query(":TRIG?") == trigBefore, "원래 주파수/트리거 복귀");
+                // 측정 조건: CV + SPEED + DC 바이어스를 보내고, 복원하면 원래 값으로 돌아오는지
+                var cond = new MeasCond { Cv = true, CvVolts = 0.5, Speed = "SLOW2", Bias = 2, BiasVolts = 1.5 };
+                string[] condKeys = { ":LEVel?", ":LEVel:CVOLTage?", ":SPEEd?", ":DCBias?", ":DCBias:LEVel?" };
+                string before = string.Join("|", condKeys.Select(k => m.Query(k)));
+                var original = cond.Read(m);
+                List<string> condLog = cond.Apply(m);
+                Check(m.Query(":LEVel?") == "CV" && m.Query(":SPEEd?") == "SLOW2" && m.Query(":DCBias?") == "ON", "측정 조건 적용");
+                Check(condLog.Count == 3 && condLog.All(l => !l.Contains("※")), "측정 조건 적용 확인 로그");
+                cond.Restore(m, original);
+                Check(string.Join("|", condKeys.Select(k => m.Query(k))) == before, "측정 조건 복원");
+                Check(!new MeasCond().Any && cond.Any, "측정 조건 변경 없음 판별");
+                output.AppendLine("측정 조건 로그: " + string.Join(" / ", condLog));
                 var multiWriter = new CsvWriter();
                 multiWriter.Start(folder, Fmt.HeaderFields(pars, 2, labels));
                 Check(multiWriter.FilePath != writer.FilePath, "같은 초에 만든 파일도 덮어쓰지 않음");
