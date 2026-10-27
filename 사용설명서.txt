@@ -1,4 +1,4 @@
-LCR Logger 1.5 사용설명서
+LCR Logger 1.6 사용설명서
 개발자: KIM YEONGDO  /  https://github.com/Dubitnarae/LCR_Logger
 
 처음 실행하면 바로 아래처럼 측정하도록 설정되어 있습니다.

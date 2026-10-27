@@ -27,8 +27,8 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("LCR Logger")]
 [assembly: System.Reflection.AssemblyCompany("KIM YEONGDO")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 KIM YEONGDO")]
-[assembly: System.Reflection.AssemblyVersion("1.5.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.5.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.6.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.6.0.0")]
 
 namespace LcrLogger
 {
@@ -892,6 +892,75 @@ namespace LcrLogger
         }
     }
 
+    // 입력 컨트롤을 감싸는 둥근 테두리 칸 (평소 연회색, 입력 중 파란색, 비활성 회색 바탕)
+    class FieldBox : Panel
+    {
+        readonly Control inner;
+        bool focused;
+        const int Height0 = 30, PadLeft = 7, PadRight = 3;
+        static readonly Color Border = Color.FromArgb(199, 199, 204);
+        static readonly Color DisabledFill = Color.FromArgb(242, 242, 245);
+
+        public FieldBox(Control inner)
+        {
+            this.inner = inner;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            Margin = new Padding(4, 3, 4, 3);
+            Size = new Size(inner.Width + PadLeft + PadRight, Height0);
+            inner.Margin = Padding.Empty;
+            Controls.Add(inner);
+            inner.Enter += delegate { focused = true; Invalidate(); };
+            inner.Leave += delegate { focused = false; Invalidate(); };
+            inner.EnabledChanged += delegate { ApplyColors(); };
+            inner.TextChanged += delegate { if (!inner.Visible) Invalidate(); };
+            var combo = inner as ComboBox;
+            if (combo != null) combo.SelectedIndexChanged += delegate { if (!inner.Visible) Invalidate(); };
+            ApplyColors();
+            // 칸 아무 곳이나 눌러도 입력 컨트롤로
+            MouseDown += delegate { if (inner.Enabled) inner.Focus(); };
+        }
+
+        void ApplyColors()
+        {
+            Color fill = inner.Enabled ? Theme.Card : DisabledFill;
+            BackColor = fill;
+            inner.BackColor = fill;
+            // 비활성 선택 상자는 자체 회색 틀이 생기므로 숨기고 값만 직접 그림
+            if (inner is ComboBox) inner.Visible = inner.Enabled;
+            Invalidate();
+        }
+
+        protected override void OnLayout(LayoutEventArgs e)
+        {
+            base.OnLayout(e);
+            inner.SetBounds(PadLeft, Math.Max(0, (Height - inner.Height) / 2), Math.Max(10, Width - PadLeft - PadRight), inner.Height);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.Clear(Theme.ParentBack(this));
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            var r = new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f);
+            using (var path = Theme.Rounded(r, 7))
+            using (var fill = new SolidBrush(BackColor))
+            using (var pen = new Pen(focused ? Theme.Accent : Border, focused ? 1.6f : 1f))
+            {
+                g.FillPath(fill, path);
+                g.DrawPath(pen, path);
+            }
+            if (!inner.Visible)
+            {
+                var textRect = new Rectangle(PadLeft + 2, 0, Width - PadLeft - 22, Height);
+                TextRenderer.DrawText(g, inner.Text, Font, textRect, Theme.Secondary, BackColor,
+                    TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+                float cx = Width - 13, cy = Height / 2f;
+                using (var p = new Pen(Color.FromArgb(175, 175, 180), 1.5f))
+                    g.DrawLines(p, new[] { new PointF(cx - 3.5f, cy - 1.5f), new PointF(cx, cy + 2), new PointF(cx + 3.5f, cy - 1.5f) });
+            }
+        }
+    }
+
     // 체크박스를 토글 스위치 모양으로 그림 (CheckBox 동작은 그대로)
     class Switch : CheckBox
     {
@@ -1165,7 +1234,7 @@ namespace LcrLogger
             layout.Controls.Add(gridCard);
 
             var cmdRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false, BackColor = Theme.Bg, Margin = new Padding(0, 0, 0, 6) };
-            txtCmd = new TextBox { Width = 300 };
+            txtCmd = new TextBox { Width = 250 };
             txtCmd.KeyDown += (s, e) =>
             {
                 if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; OnSendCommand(s, e); }
@@ -1357,18 +1426,25 @@ namespace LcrLogger
             return b;
         }
 
-        // 입력 칸을 평평한 모양으로
+        // 선택 상자, 입력 칸, 숫자 칸을 모두 같은 둥근 테두리 칸(FieldBox)에 넣음
         static void StyleInputs(Control parent)
         {
-            foreach (Control c in parent.Controls)
+            foreach (Control c in parent.Controls.Cast<Control>().ToList())
             {
                 var combo = c as ComboBox;
                 var text = c as TextBox;
                 var num = c as NumericUpDown;
-                if (combo != null) { combo.FlatStyle = FlatStyle.Flat; combo.BackColor = Theme.Card; combo.Margin = new Padding(4, 5, 4, 3); }
-                else if (text != null && text.BorderStyle == BorderStyle.Fixed3D) { text.BorderStyle = BorderStyle.FixedSingle; text.Margin = new Padding(4, 5, 4, 3); }
-                else if (num != null) { num.BorderStyle = BorderStyle.FixedSingle; num.Margin = new Padding(4, 5, 4, 3); }
-                StyleInputs(c);
+                bool wrap = false;
+                if (combo != null) { combo.FlatStyle = FlatStyle.Flat; wrap = true; }
+                else if (text != null && text.BorderStyle == BorderStyle.Fixed3D) { text.BorderStyle = BorderStyle.None; wrap = true; }
+                else if (num != null) { num.BorderStyle = BorderStyle.None; wrap = true; }
+
+                if (!wrap) { StyleInputs(c); continue; }
+                int index = parent.Controls.GetChildIndex(c);
+                parent.Controls.Remove(c);
+                var field = new FieldBox(c);
+                parent.Controls.Add(field);
+                parent.Controls.SetChildIndex(field, index);
             }
         }
 
