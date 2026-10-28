@@ -1,0 +1,7 @@
+*.exe
+*.exe.new
+*.exe.old
+release/
+data/
+공식프로그램/
+CLAUDE.md

@@ -27,8 +27,8 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("LCR Logger")]
 [assembly: System.Reflection.AssemblyCompany("KIM YEONGDO")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 KIM YEONGDO")]
-[assembly: System.Reflection.AssemblyVersion("1.10.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.10.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.11.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.11.0.0")]
 
 namespace LcrLogger
 {
@@ -431,24 +431,52 @@ namespace LcrLogger
             return modeOk && Fmt.TryParse(response, out got) && Math.Abs(got - wanted) <= tolerance;
         }
 
-        // Read로 읽어 둔 값을 되돌림 (Apply의 반대 순서)
-        public void Restore(IMeter m, Dictionary<string, string> s)
+        // 복원 순서 (Apply의 반대): DC 바이어스 → SPEED → 레벨 값 → 신호 종류 → PAR1~4
+        static readonly string[] RestoreOrder =
+        {
+            ":DCBias:LEVel", ":DCBias", ":SPEEd", ":LEVel:VOLTage", ":LEVel:CVOLTage", ":LEVel:CCURRent", ":LEVel",
+            ":PARameter1", ":PARameter2", ":PARameter3", ":PARameter4"
+        };
+
+        // Read로 읽어 둔 값을 되돌림. 저장된 항목만 보내므로 프로그램을 다시 켠 뒤에도 그대로 쓸 수 있음
+        public static void Restore(IMeter m, Dictionary<string, string> s)
         {
             string v;
-            if (Bias != 0)
+            foreach (string key in RestoreOrder)
+                if (s.TryGetValue(key, out v) && v.Length > 0) m.Send(key + " " + v);
+        }
+
+        // 설정 파일에 보관하는 형식: "키 값|키 값|..." (키와 응답 값에는 공백·| 가 없음)
+        public static string Serialize(Dictionary<string, string> s)
+        {
+            return string.Join("|", RestoreOrder.Where(s.ContainsKey).Select(k => k + " " + s[k]));
+        }
+
+        public static Dictionary<string, string> Deserialize(string text)
+        {
+            var s = new Dictionary<string, string>();
+            foreach (string part in text.Split('|'))
             {
-                if (Bias == 2 && s.TryGetValue(":DCBias:LEVel", out v) && v.Length > 0) m.Send(":DCBias:LEVel " + v);
-                if (s.TryGetValue(":DCBias", out v) && v.Length > 0) m.Send(":DCBias " + v);
+                int sp = part.IndexOf(' ');
+                if (sp > 0 && RestoreOrder.Contains(part.Substring(0, sp))) s[part.Substring(0, sp)] = part.Substring(sp + 1).Trim();
             }
-            if (Speed != null && s.TryGetValue(":SPEEd", out v) && v.Length > 0) m.Send(":SPEEd " + v);
-            if (Level != null)
+            return s;
+        }
+
+        // CSV에 남길 실제 측정 조건 (프로그램이 바꾸지 않은 항목도 계측기에서 읽음). 예: "CV 1.000V / SPEED MEDIUM / DC바이어스 OFF"
+        public static string Summary(IMeter m)
+        {
+            string mode = m.Query(":LEVel?").Trim().ToUpperInvariant();
+            string level = mode;
+            if (mode == "V" || mode == "CV" || mode == "CC")
             {
-                if (s.TryGetValue(LevelKey(Level), out v) && v.Length > 0) m.Send(LevelKey(Level) + " " + v);
-                if (s.TryGetValue(":LEVel", out v) && v.Length > 0) m.Send(":LEVel " + v);
+                string v = m.Query(LevelKey(mode) + "?").Trim();
+                double a;
+                level += " " + (mode == "CC" && Fmt.TryParse(v, out a) ? Volts(a * 1000, "G6") + "mA" : v + "V");
             }
-            // PAR는 맨 나중에 PAR1부터 차례로
-            for (int i = 0; i < Pars.Length; i++)
-                if (Pars[i] != null && s.TryGetValue(ParKey(i), out v) && v.Length > 0) m.Send(ParKey(i) + " " + v);
+            string bias = m.Query(":DCBias?").Trim().ToUpperInvariant();
+            if (bias == "ON") bias += " " + m.Query(":DCBias:LEVel?").Trim() + "V";
+            return level + " / SPEED " + m.Query(":SPEEd?").Trim().ToUpperInvariant() + " / DC바이어스 " + bias;
         }
     }
 
@@ -735,7 +763,7 @@ namespace LcrLogger
         // frequencyLabels가 비어 있으면 단일 측정, 있으면 주파수마다 파라미터 열을 반복
         public static List<string> HeaderFields(List<string> pars, int inductanceUnit, List<string> frequencyLabels)
         {
-            var fields = new List<string> { "No", "측정시각", "메모" };
+            var fields = new List<string> { "No", "측정시각", "메모", "측정조건" };
             if (frequencyLabels.Count == 0)
                 fields.AddRange(pars.Select(p => Header(p, inductanceUnit)));
             else
@@ -750,13 +778,14 @@ namespace LcrLogger
             return response.Split(',').Select(t => t.Trim()).ToArray();
         }
 
-        public static string[] RowFields(int no, DateTime time, string memo, List<string> pars, List<string> responses, int inductanceUnit)
+        public static string[] RowFields(int no, DateTime time, string memo, string condition, List<string> pars, List<string> responses, int inductanceUnit)
         {
             var fields = new List<string>
             {
                 no.ToString(CultureInfo.InvariantCulture),
                 time.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
-                memo
+                memo,
+                condition ?? ""
             };
             foreach (string response in responses)
             {
@@ -920,6 +949,16 @@ namespace LcrLogger
         public void Set(string key, string value)
         {
             values[key] = value;
+        }
+
+        public void Remove(string key)
+        {
+            values.Remove(key);
+        }
+
+        public List<string> KeysWithPrefix(string prefix)
+        {
+            return values.Keys.Where(k => k.StartsWith(prefix, StringComparison.Ordinal)).ToList();
         }
 
         public void Save()
@@ -1241,6 +1280,12 @@ namespace LcrLogger
     {
         ComboBox cbPort, cbBaud, cbUnit, cbSpeed, cbBias, cbLevel;
         ComboBox[] cbPar;                           // PAR2~PAR4 (PAR1은 Ls 고정)
+        ComboBox cbPreset;                          // 측정 조건 프리셋 (이름을 직접 입력해 저장)
+        Button btnApplyCond, btnPresetSave, btnPresetDelete;
+        string condText = "";                       // CSV 측정조건 열에 남길 계측기의 실제 조건
+        string currentIdn;                          // 연결한 계측기 *IDN? (복원 못 한 설정을 같은 계측기에만 되돌리기 위함)
+        string updateAttemptDay;                    // 오늘 업데이트 확인을 시도했는지 (실패해도 1초마다 다시 시도하지 않도록)
+        const string PresetPrefix = "Preset.";
         Label lblLevelUnit;
         TextBox txtCv, txtBias;                     // txtCv: 측정 신호 레벨 값 (V 또는 mA)
         MeasCond connectCond;                       // 연결할 때 적용한 측정 조건 (재연결 때 다시 보냄)
@@ -1405,6 +1450,19 @@ namespace LcrLogger
                 parRow.Add(cbPar[i]);
             }
             Add(cond, parRow.ToArray());
+            cond.SetFlowBreak(cbPar[cbPar.Length - 1], true);
+
+            // 프리셋: 이름을 입력하고 [저장], 목록에서 고르면 불러옴. 연결 중이면 [적용]으로 계측기에 반영
+            cbPreset = new ComboBox { DropDownStyle = ComboBoxStyle.DropDown, Width = 170 };
+            cbPreset.SelectionChangeCommitted += delegate { LoadPreset(cbPreset.SelectedItem as string); };
+            btnPresetSave = Btn("프리셋 저장", OnPresetSave);
+            btnPresetSave.Width = 100;
+            btnPresetDelete = Btn("삭제", OnPresetDelete);
+            btnApplyCond = Btn("연결 중 적용", OnApplyCond, true);
+            btnApplyCond.Width = 110;
+            var applyHint = Lbl("연결 중에 바꾼 조건은 [연결 중 적용]을 눌러야 계측기에 반영됩니다");
+            applyHint.ForeColor = Theme.Secondary;
+            Add(cond, Lbl("프리셋"), cbPreset, btnPresetSave, btnPresetDelete, btnApplyCond, applyHint);
             layout.Controls.Add(cond.Parent);
 
             // 3. 저장
@@ -1498,7 +1556,7 @@ namespace LcrLogger
                 if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; OnSendCommand(s, e); }
             };
             btnSend = Btn("명령 전송", OnSendCommand);
-            chkAutoUpdate = new Switch { Text = "시작할 때 업데이트 확인", Margin = new Padding(20, 4, 3, 3) };
+            chkAutoUpdate = new Switch { Text = "하루 한 번 업데이트 확인", Margin = new Padding(20, 4, 3, 3) };
             btnUpdate = Btn("업데이트 확인", async delegate { await CheckUpdate(false); });
             var btnAbout = Btn("정보", OnAbout);
             var lblDev = new Label { AutoSize = true, Margin = new Padding(12, 9, 3, 3), ForeColor = Theme.Secondary, Text = "개발자: " + Updater.Developer };
@@ -1537,7 +1595,7 @@ namespace LcrLogger
             Shown += async delegate
             {
                 ApplyHotkey();
-                if (chkAutoUpdate.Checked) await CheckUpdate(true);
+                if (chkAutoUpdate.Checked) await CheckUpdateDaily();
             };
             SetupColumns();
         }
@@ -1552,7 +1610,22 @@ namespace LcrLogger
                 "정보", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
-        // quiet = 시작할 때 자동 확인 (실패나 최신 상태는 로그에만 남김)
+        static string Today()
+        {
+            return DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        }
+
+        // 자동 확인은 하루 한 번: 오늘 확인에 성공했으면 여러 번 실행해도 다시 확인하지 않음
+        async Task CheckUpdateDaily()
+        {
+            string today = Today();
+            if (updating || updateAttemptDay == today) return;
+            updateAttemptDay = today;
+            if (settings.Get("LastUpdateCheck", "") == today) return;
+            await CheckUpdate(true);
+        }
+
+        // quiet = 자동 확인 (실패나 최신 상태는 로그에만 남김)
         async Task CheckUpdate(bool quiet)
         {
             if (updating) return;
@@ -1561,7 +1634,12 @@ namespace LcrLogger
             try
             {
                 UpdateInfo info;
-                try { info = await Updater.CheckAsync(); }
+                try
+                {
+                    info = await Updater.CheckAsync();
+                    settings.Set("LastUpdateCheck", Today());   // 확인에 성공한 날은 다시 확인하지 않음
+                    settings.Save();
+                }
                 catch (Exception ex)
                 {
                     Log("업데이트 확인 실패: " + ex.Message);
@@ -1582,7 +1660,10 @@ namespace LcrLogger
                 }
                 if (busy || autoRunning)
                 {
-                    Log("측정 중이라 업데이트를 미룹니다. 측정이 끝난 뒤 [업데이트 확인]을 누르세요.");
+                    // 측정이 끝나면 다시 확인하도록 오늘 확인 기록을 지움
+                    settings.Set("LastUpdateCheck", "");
+                    updateAttemptDay = null;
+                    Log("측정 중이라 업데이트를 미룹니다. 측정이 끝나면 다시 확인합니다.");
                     return;
                 }
                 string notes = string.IsNullOrEmpty(info.Notes) ? "" : "\n\n변경 내용:\n" + (info.Notes.Length > 600 ? info.Notes.Substring(0, 600) + "..." : info.Notes);
@@ -1626,6 +1707,7 @@ namespace LcrLogger
             cbUnit.SelectedIndex = unitIndex;
             for (int i = 0; i < cbPar.Length; i++)
                 cbPar[i].SelectedIndex = settings.GetInt("CondPar" + (i + 2), 0, 0, ParChoices.Length - 1);
+            RefreshPresets(null);
             cbBaud.SelectedIndex = settings.GetInt("Baud", 0, 0, cbBaud.Items.Count - 1);
             chkTrg.Checked = settings.Get("ExtTrigger", "0") == "1";
             numInterval.Value = settings.GetInt("IntervalMs", 1000, 200, 3600000) / 1000M;
@@ -1882,12 +1964,217 @@ namespace LcrLogger
         async Task ApplyConditions(IMeter m, MeasCond cond, bool keepOriginal)
         {
             if (cond == null || !cond.Any) return;
-            List<string> lines = await Io(() =>
+            if (!keepOriginal)
             {
-                if (!keepOriginal) savedCond = cond.Read(m);
-                return cond.Apply(m);
-            });
+                savedCond = await Io(() => cond.Read(m));
+                PersistPending();   // 적용 도중 프로그램이 죽어도 다음 연결 때 되돌릴 수 있도록 먼저 파일에 남김
+            }
+            List<string> lines = await Io(() => cond.Apply(m));
             foreach (string line in lines) Log(line);
+        }
+
+        static List<string> ReadParNames(IMeter m)
+        {
+            var list = new List<string>();
+            for (int i = 1; i <= 4; i++)
+                list.Add(m.Query(":PAR" + i + "?").ToUpperInvariant());
+            return list;
+        }
+
+        // CSV 측정조건 열에 남길 값을 계측기에서 읽음
+        async Task UpdateCondText(IMeter m)
+        {
+            try { condText = await Io(() => MeasCond.Summary(m)); }
+            catch (TimeoutException) { condText = "확인 불가"; }
+            Log("측정 조건(계측기): " + condText);
+        }
+
+        // ---------------- 복원 못 한 측정 조건 (비정상 종료 대비) ----------------
+
+        // 바꾸기 전 원래 값을 설정 파일에 저장. 정상적으로 복원하면 지움
+        void PersistPending()
+        {
+            settings.Set("PendingRestore", savedCond == null ? "" : MeasCond.Serialize(savedCond));
+            settings.Set("PendingIdn", savedCond == null ? "" : currentIdn ?? "");
+            settings.Save();
+        }
+
+        // 지난번에 되돌리지 못한 값이 있으면 같은 계측기일 때만 되돌릴지 물음
+        async Task OfferPendingRestore(IMeter local, string idn)
+        {
+            string pending = settings.Get("PendingRestore", "");
+            if (pending.Length == 0) return;
+            string pendingIdn = settings.Get("PendingIdn", "");
+            settings.Set("PendingRestore", "");
+            settings.Set("PendingIdn", "");
+            settings.Save();
+            if (pendingIdn != idn)
+            {
+                Log("이전에 복원하지 못한 측정 조건이 있지만 다른 계측기라 되돌리지 않습니다.");
+                return;
+            }
+            Dictionary<string, string> s = MeasCond.Deserialize(pending);
+            if (s.Count == 0) return;
+            string list = string.Join("\n", s.Select(kv => "  " + kv.Key + " " + kv.Value));
+            if (MessageBox.Show(this,
+                    "지난번 연결을 정상적으로 끝내지 못해(프로그램 비정상 종료, USB 끊김 등) 계측기의 측정 조건을 원래대로 되돌리지 못했습니다.\n\n"
+                    + "아래 원래 값으로 되돌린 뒤 연결할까요?\n\n" + list,
+                    "측정 조건 복원", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            {
+                Log("이전 측정 조건 복원을 건너뛰었습니다.");
+                return;
+            }
+            await Io(() => { MeasCond.Restore(local, s); return true; });
+            Log("이전에 복원하지 못한 측정 조건을 원래대로 되돌렸습니다.");
+        }
+
+        // ---------------- 연결 중 측정 조건 적용 ----------------
+
+        // 처음 연결 전 값으로 한 번 되돌린 뒤 새 조건을 적용 (복원 기준은 계속 처음 연결 전 값)
+        async void OnApplyCond(object sender, EventArgs e)
+        {
+            if (meter == null || busy || autoRunning) return;
+            MeasCond cond;
+            try { cond = ReadCond(); }
+            catch (InvalidOperationException ex)
+            {
+                MessageBox.Show(this, ex.Message, "측정 조건", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            IMeter m = meter;
+            busy = true;
+            UpdateUi();
+            try
+            {
+                if (savedCond != null)
+                {
+                    var original = savedCond;
+                    await Io(() => { MeasCond.Restore(m, original); return true; });
+                }
+                await ApplyConditions(m, cond, false);
+                connectCond = cond;
+                List<string> names = await Io(() => ReadParNames(m));
+                await UpdateCondText(m);
+                var newPars = names.Where(p => p.Length > 0 && p != "OFF").ToList();
+                if (!newPars.SequenceEqual(pars))
+                {
+                    pars = newPars;
+                    StartNewTable("측정 파라미터가 바뀌어 새 파일로 시작합니다: " + string.Join(", ", names));
+                }
+                Log("측정 조건을 적용했습니다.");
+            }
+            catch (Exception ex)
+            {
+                if (IsDisconnect(ex, m)) OnLost("USB 연결이 끊어졌습니다: " + ex.Message);
+                else Log("측정 조건 적용 실패: " + ex.Message);
+            }
+            finally
+            {
+                busy = false;
+                UpdateUi();
+            }
+        }
+
+        // ---------------- 측정 조건 프리셋 ----------------
+
+        static readonly string[] LevelModes = { "-", "V", "CV", "CC" };
+
+        static string ItemToken(ComboBox cb)
+        {
+            return cb.SelectedIndex <= 0 ? "-" : (string)cb.SelectedItem;
+        }
+
+        static void SelectToken(ComboBox cb, Dictionary<string, string> d, string key)
+        {
+            string v;
+            if (!d.TryGetValue(key, out v)) return;
+            int index = v == "-" ? 0 : cb.Items.IndexOf(v);
+            if (index >= 0) cb.SelectedIndex = index;
+        }
+
+        // 형식: "L=CV;LV=1.000;S=FAST;B=ON;BV=1.50;P2=Z;P3=-;P4=-" (콤보 번호 대신 값으로 저장해 목록이 바뀌어도 유지)
+        string PresetText()
+        {
+            var parts = new List<string>
+            {
+                "L=" + LevelModes[Math.Max(0, cbLevel.SelectedIndex)],
+                "LV=" + txtCv.Text.Trim().Replace(";", ""),
+                "S=" + ItemToken(cbSpeed),
+                "B=" + ItemToken(cbBias),
+                "BV=" + txtBias.Text.Trim().Replace(";", "")
+            };
+            for (int i = 0; i < cbPar.Length; i++)
+                parts.Add("P" + (i + 2) + "=" + ItemToken(cbPar[i]));
+            return string.Join(";", parts);
+        }
+
+        void LoadPreset(string name)
+        {
+            if (name == null) return;
+            string text = settings.Get(PresetPrefix + name, null);
+            if (text == null) return;
+            var d = new Dictionary<string, string>();
+            foreach (string part in text.Split(';'))
+            {
+                int eq = part.IndexOf('=');
+                if (eq > 0) d[part.Substring(0, eq)] = part.Substring(eq + 1);
+            }
+            string v;
+            if (d.TryGetValue("L", out v) && Array.IndexOf(LevelModes, v) >= 0) cbLevel.SelectedIndex = Array.IndexOf(LevelModes, v);
+            if (d.TryGetValue("LV", out v) && v.Length > 0) txtCv.Text = v;   // 종류를 바꾼 뒤에 넣어야 기본값으로 덮이지 않음
+            SelectToken(cbSpeed, d, "S");
+            SelectToken(cbBias, d, "B");
+            if (d.TryGetValue("BV", out v) && v.Length > 0) txtBias.Text = v;
+            for (int i = 0; i < cbPar.Length; i++)
+                SelectToken(cbPar[i], d, "P" + (i + 2));
+            Log("프리셋 불러옴: " + name + (meter != null ? " - [연결 중 적용]을 눌러야 계측기에 반영됩니다." : ""));
+        }
+
+        void RefreshPresets(string select)
+        {
+            cbPreset.Items.Clear();
+            foreach (string key in settings.KeysWithPrefix(PresetPrefix).OrderBy(k => k, StringComparer.CurrentCulture))
+                cbPreset.Items.Add(key.Substring(PresetPrefix.Length));
+            cbPreset.Text = select ?? "";
+        }
+
+        void OnPresetSave(object sender, EventArgs e)
+        {
+            string name = cbPreset.Text.Trim();
+            if (name.Length == 0 || name.IndexOfAny(new[] { '=', '\r', '\n' }) >= 0)
+            {
+                MessageBox.Show(this, "프리셋 칸에 이름을 입력한 뒤 [프리셋 저장]을 누르세요.\n(이름에 '='는 쓸 수 없습니다)", "프리셋", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            try { ReadCond(); }
+            catch (InvalidOperationException ex)
+            {
+                MessageBox.Show(this, ex.Message, "프리셋", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            if (settings.Get(PresetPrefix + name, null) != null
+                && MessageBox.Show(this, "프리셋 '" + name + "'이 이미 있습니다. 지금 설정으로 덮어쓸까요?", "프리셋", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                return;
+            settings.Set(PresetPrefix + name, PresetText());
+            settings.Save();
+            RefreshPresets(name);
+            Log("프리셋 저장: " + name);
+        }
+
+        void OnPresetDelete(object sender, EventArgs e)
+        {
+            string name = cbPreset.Text.Trim();
+            if (name.Length == 0 || settings.Get(PresetPrefix + name, null) == null)
+            {
+                MessageBox.Show(this, "삭제할 프리셋을 목록에서 고르세요.", "프리셋", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            if (MessageBox.Show(this, "프리셋 '" + name + "'을 삭제할까요?", "프리셋", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                return;
+            settings.Remove(PresetPrefix + name);
+            settings.Save();
+            RefreshPresets(null);
+            Log("프리셋 삭제: " + name);
         }
 
         // 연결 확인 절차: *IDN?, LCR 모드 확인, 측정 파라미터 읽기. 결과는 (IDN, PAR1~4)
@@ -1901,6 +2188,7 @@ namespace LcrLogger
                 return id;
             });
             Log("응답: " + idn);
+            currentIdn = idn;
 
             // :PAR1? 등은 LCR 모드 전용이라 연속 측정(CONT) 모드에서는 응답하지 않음
             string mode = null;
@@ -1929,15 +2217,11 @@ namespace LcrLogger
 
             try
             {
+                if (interactive) await OfferPendingRestore(local, idn);
                 // 측정 조건(PAR 포함)을 먼저 보낸 뒤 PAR를 읽어야 표 열이 설정과 맞음
                 await ApplyConditions(local, cond, keepOriginal);
-                var names = await Io(() =>
-                {
-                    var list = new List<string>();
-                    for (int i = 1; i <= 4; i++)
-                        list.Add(local.Query(":PAR" + i + "?").ToUpperInvariant());
-                    return list;
-                });
+                var names = await Io(() => ReadParNames(local));
+                await UpdateCondText(local);
                 return new KeyValuePair<string, List<string>>(idn, names);
             }
             catch (TimeoutException ex)
@@ -1956,10 +2240,16 @@ namespace LcrLogger
                 {
                     try
                     {
-                        connectCond.Restore(meter, savedCond);
+                        MeasCond.Restore(meter, savedCond);
+                        savedCond = null;
+                        PersistPending();   // 복원했으니 파일에 남긴 원래 값도 지움
                         Log("측정 조건을 원래대로 복원했습니다.");
                     }
-                    catch (Exception ex) { Log("측정 조건 복원 실패: " + ex.Message); }
+                    catch (Exception ex)
+                    {
+                        // 파일에 남은 원래 값으로 다음 연결 때 되돌릴지 물음
+                        Log("측정 조건 복원 실패 (다음 연결 때 다시 묻습니다): " + ex.Message);
+                    }
                     savedCond = null;
                 }
                 try { meter.Dispose(); }
@@ -2021,7 +2311,7 @@ namespace LcrLogger
         {
             waitingReconnect = false;
             reconnectGen++;
-            savedCond = null;   // 통신이 끊긴 상태라 복원할 수 없음
+            savedCond = null;   // 통신이 끊긴 상태라 지금은 복원할 수 없음 (파일에 남은 값으로 다음 연결 때 물음)
             lblModel.Text = "연결 안 됨";
             lblModel.ForeColor = Theme.Secondary;
         }
@@ -2029,6 +2319,7 @@ namespace LcrLogger
         void OnWatchTick(object sender, EventArgs e)
         {
             if (busy || reconnecting) return;
+            if (chkAutoUpdate.Checked && !autoRunning && !updating && updateAttemptDay != Today()) { var _ = CheckUpdateDaily(); }   // 켜 둔 채 날짜가 바뀌면 확인
             var serial = meter as SerialMeter;
             if (serial != null)
             {
@@ -2186,7 +2477,7 @@ namespace LcrLogger
 
             lastResponses = responses;
             lastPars = pars;
-            string[] row = Fmt.RowFields(rows.Count + 1, DateTime.Now, txtMemo.Text, pars, responses, unitIndex);
+            string[] row = Fmt.RowFields(rows.Count + 1, DateTime.Now, txtMemo.Text, condText, pars, responses, unitIndex);
             rows.Add(row);
             grid.Rows.Add(row);
             grid.FirstDisplayedScrollingRowIndex = grid.Rows.Count - 1;
@@ -2407,6 +2698,7 @@ namespace LcrLogger
             grid.Columns[0].FillWeight = 30;
             grid.Columns[0].MinimumWidth = 44;
             grid.Columns[1].FillWeight = 110;
+            grid.Columns[3].FillWeight = 150;   // 측정조건
         }
 
         void StartNewTable(string message)
@@ -2521,8 +2813,12 @@ namespace LcrLogger
             // 재연결을 기다리는 동안에는 끊기기 전 설정 그대로 다시 연결하므로 설정을 잠금
             bool editable = !connected && !busy && !waitingReconnect;
             cbPort.Enabled = btnRefresh.Enabled = cbBaud.Enabled = chkDemo.Enabled = chkMulti.Enabled = editable;
-            foreach (ComboBox c in cbPar) c.Enabled = editable;
-            cbLevel.Enabled = txtCv.Enabled = cbSpeed.Enabled = cbBias.Enabled = txtBias.Enabled = editable;
+            // 측정 조건은 연결 중에도 바꿀 수 있음 ([연결 중 적용]으로 반영)
+            bool condEditable = !busy && !waitingReconnect && !autoRunning;
+            foreach (ComboBox c in cbPar) c.Enabled = condEditable;
+            cbPreset.Enabled = btnPresetSave.Enabled = btnPresetDelete.Enabled = condEditable;
+            btnApplyCond.Enabled = connected && condEditable;
+            cbLevel.Enabled = txtCv.Enabled = cbSpeed.Enabled = cbBias.Enabled = txtBias.Enabled = condEditable;
             foreach (TextBox t in txtFreq) t.Enabled = editable;
             chkTrg.Enabled = freqs.Count == 0 || !connected;
             btnMeasure.Enabled = connected && !busy && !autoRunning;
@@ -2564,7 +2860,7 @@ namespace LcrLogger
                 for (int n = 1; n <= 3; n++)
                 {
                     string response = m.Query(":MEAS?");
-                    writer.Append(Fmt.RowFields(n, DateTime.Now, n == 2 ? "코일, A" : "", pars, new List<string> { response }, 2));
+                    writer.Append(Fmt.RowFields(n, DateTime.Now, n == 2 ? "코일, A" : "", "CV 1.000V / SPEED MEDIUM / DC바이어스 OFF", pars, new List<string> { response }, 2));
                     output.AppendLine("응답: " + response + "  ->  " + Fmt.Pretty(pars[0], response.Split(',')[0]));
                 }
                 output.AppendLine("CSV: " + writer.FilePath);
@@ -2596,7 +2892,7 @@ namespace LcrLogger
                 Check(m.Query(":LEVel?") == "CC" && m.Query(":LEVel:CCURRent?") == "2.00E-02" && m.Query(":SPEEd?") == "SLOW2" && m.Query(":DCBias?") == "ON", "측정 조건 적용");
                 Check(condLog.Count == 4 && condLog.All(l => !l.Contains("※")), "측정 조건 적용 확인 로그");
                 Check(m.Query(":PARameter3?") == "PHASE" && m.Query(":MEAS?").Split(',').Length == 3, "PAR2~4 적용 (측정 응답 3개)");
-                cond.Restore(m, original);
+                MeasCond.Restore(m, original);
                 Check(string.Join("|", condKeys.Select(k => m.Query(k))) == before, "측정 조건 복원");
                 Check(!new MeasCond().Any && cond.Any, "측정 조건 변경 없음 판별");
                 foreach (string lv in new[] { "V", "CV" })
@@ -2605,10 +2901,27 @@ namespace LcrLogger
                     var saved = one.Read(m);
                     List<string> oneLog = one.Apply(m);
                     Check(oneLog.Count == 1 && !oneLog[0].Contains("※") && m.Query(":LEVel?") == lv, "측정 신호 " + lv + " 적용");
-                    one.Restore(m, saved);
+                    MeasCond.Restore(m, saved);
                     Check(string.Join("|", condKeys.Select(k => m.Query(k))) == before, "측정 신호 " + lv + " 복원");
                 }
                 output.AppendLine("측정 조건 로그: " + string.Join(" / ", condLog));
+
+                // 비정상 종료 대비: 원래 값을 문자열로 저장했다가 다시 읽어 되돌릴 수 있는지
+                var crash = new MeasCond { Level = "CC", LevelValue = 0.01, Speed = "FAST", Bias = 2, BiasVolts = 2, Pars = new[] { "LS", "CP", "D", "Q" } };
+                string stored = MeasCond.Serialize(crash.Read(m));
+                crash.Apply(m);
+                Check(MeasCond.Deserialize(stored).Count == 9, "보관한 원래 값 개수");
+                MeasCond.Restore(m, MeasCond.Deserialize(stored));
+                Check(string.Join("|", condKeys.Select(k => m.Query(k))) == before, "보관한 원래 값으로 복원");
+                Check(MeasCond.Deserialize("이상한 값|:FREQ 1|:SPEEd").Count == 0, "보관 값 중 모르는 명령은 무시");
+
+                // CSV 측정조건 열: 바꾸지 않은 항목도 계측기 실제 값으로
+                string summary = MeasCond.Summary(m);
+                Check(summary == "V 1.000V / SPEED MEDIUM / DC바이어스 OFF", "측정 조건 요약 " + summary);
+                new MeasCond { Level = "CC", LevelValue = 0.02, Bias = 2, BiasVolts = 1.5 }.Apply(m);
+                Check(MeasCond.Summary(m) == "CC 20mA / SPEED MEDIUM / DC바이어스 ON 1.50V", "측정 조건 요약 (CC, 바이어스)");
+                MeasCond.Restore(m, MeasCond.Deserialize(stored));
+                output.AppendLine("측정 조건 요약: " + summary);
                 var multiWriter = new CsvWriter();
                 multiWriter.Start(folder, Fmt.HeaderFields(pars, 2, labels));
                 Check(multiWriter.FilePath != writer.FilePath, "같은 초에 만든 파일도 덮어쓰지 않음");
@@ -2627,9 +2940,10 @@ namespace LcrLogger
                 Check(string.Join(",", picked) == "100,90", "Lp가 같이 있어도 Ls만 입력");
                 output.AppendLine("셀 입력값(인덕턴스만): " + string.Join(" [Tab] ", lOnly));
                 output.AppendLine("셀 입력값(전체): " + string.Join(" [Tab] ", all));
-                multiWriter.Append(Fmt.RowFields(1, DateTime.Now, "", pars, responses, 2));
+                multiWriter.Append(Fmt.RowFields(1, DateTime.Now, "", MeasCond.Summary(m), pars, responses, 2));
                 string[] multiLines = File.ReadAllLines(multiWriter.FilePath, Encoding.UTF8);
-                Check(multiLines[0].Contains("Ls@1kHz [µH],Q@1kHz,Ls@100kHz [µH]"), "다중 주파수 열 제목");
+                Check(multiLines[0].Contains("메모,측정조건,Ls@1kHz [µH],Q@1kHz,Ls@100kHz [µH]"), "다중 주파수 열 제목 (측정조건 열 포함)");
+                Check(multiLines[1].Contains(",V 1.000V / SPEED MEDIUM / DC바이어스 OFF,"), "CSV 측정조건 값");
                 Check(multiLines[1].Split(',').Length >= 3 + 8, "다중 주파수 값 열 개수");
                 output.AppendLine("다중 주파수 CSV:");
                 output.AppendLine(multiLines[0]);
