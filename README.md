@@ -30,7 +30,7 @@ CSV 파일은 엑셀에서 바로 열 수 있고, 구글 스프레드시트에�
 
 | 경로 | 내용 |
 |---|---|
-| `LCR_Logger.exe` | 실행 파일. 설치 없이 더블클릭으로 실행합니다. |
+| `LCR_Logger.exe` | 실행 파일. 설치 없이 더블클릭으로 실행합니다. 저장소에는 없으며, [릴리스](https://github.com/Dubitnarae/LCR_Logger/releases/latest)의 zip에서 받거나 `build.bat`으로 빌드합니다. |
 | `data\` | 측정 데이터(CSV)가 저장되는 기본 폴더. 첫 측정 때 자동으로 만들어집니다. |
 | `src\LcrLogger.cs` | 소스 코드 |
 | `build.bat` | 소스를 고친 뒤 다시 빌드할 때 실행합니다. |
