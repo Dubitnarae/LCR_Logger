@@ -27,8 +27,8 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("LCR Logger")]
 [assembly: System.Reflection.AssemblyCompany("KIM YEONGDO")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 KIM YEONGDO")]
-[assembly: System.Reflection.AssemblyVersion("1.11.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.11.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.12.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.12.0.0")]
 
 namespace LcrLogger
 {
@@ -1348,6 +1348,31 @@ namespace LcrLogger
             if (justUpdated) Log("버전 " + Updater.CurrentText + "(으)로 업데이트했습니다.");
         }
 
+        TableLayoutPanel mainLayout;
+        bool fitPending;
+        const int GridRow = 7;   // layout에서 측정 기록 표가 들어 있는 행 (카드 7개 다음)
+
+        // 남는 공간이 최소 높이보다 작으면 표 행을 고정 높이로 바꿔 스크롤바가 생기게 함. 공간이 넉넉하면 원래대로 채움
+        void FitGridRow()
+        {
+            if (mainLayout == null || mainLayout.IsDisposed) return;
+            int[] heights = mainLayout.GetRowHeights();
+            if (heights.Length <= GridRow) return;
+            int others = heights.Sum() - heights[GridRow];
+            int room = mainLayout.ClientSize.Height - mainLayout.Padding.Vertical - others;
+            int min = Font.Height * 12;   // 행 5~6개가 보이는 정도 (DPI에 맞춰 커짐)
+            RowStyle style = mainLayout.RowStyles[GridRow];
+            if (room >= min)
+            {
+                if (style.SizeType != SizeType.Percent) { style.SizeType = SizeType.Percent; style.Height = 100; }
+            }
+            else if (style.SizeType != SizeType.Absolute || (int)style.Height != min)
+            {
+                style.SizeType = SizeType.Absolute;
+                style.Height = min;
+            }
+        }
+
         void BuildUi()
         {
             var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(14, 12, 14, 10), BackColor = Theme.Bg };
@@ -1363,6 +1388,15 @@ namespace LcrLogger
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 96));
             Controls.Add(layout);
+            // 화면이 작아 카드들이 높이를 다 차지하면 표 높이가 0이 됨 → 표에 최소 높이를 주고 창 전체를 스크롤
+            mainLayout = layout;
+            layout.AutoScroll = true;
+            layout.Layout += delegate
+            {
+                if (fitPending || !layout.IsHandleCreated) return;
+                fitPending = true;
+                layout.BeginInvoke((Action)(() => { fitPending = false; FitGridRow(); }));   // 배치가 끝난 뒤 높이를 보고 판단
+            };
 
             // 1. 연결
             var conn = Group("1. 연결");
@@ -2433,7 +2467,11 @@ namespace LcrLogger
             catch (Exception ex)
             {
                 if (IsDisconnect(ex, m)) OnLost("USB 연결이 끊어졌습니다: " + ex.Message);
-                else Log("측정 실패: " + ex.Message);
+                else
+                {
+                    Log("측정 실패: " + ex.Message);
+                    ShowFailure(ex.Message);
+                }
                 return null;
             }
             finally
@@ -2479,10 +2517,15 @@ namespace LcrLogger
             lastPars = pars;
             string[] row = Fmt.RowFields(rows.Count + 1, DateTime.Now, txtMemo.Text, condText, pars, responses, unitIndex);
             rows.Add(row);
+            WriteCsv(row);   // 데이터부터 저장: 아래 화면 표시에서 오류가 나도 기록은 남음
             grid.Rows.Add(row);
-            grid.FirstDisplayedScrollingRowIndex = grid.Rows.Count - 1;
-            grid.ClearSelection();
-            grid.Rows[grid.Rows.Count - 1].Selected = true;
+            try
+            {
+                grid.FirstDisplayedScrollingRowIndex = grid.Rows.Count - 1;
+                grid.ClearSelection();
+                grid.Rows[grid.Rows.Count - 1].Selected = true;
+            }
+            catch (InvalidOperationException) { }   // 창이 작아 표 높이가 0이면 스크롤할 수 없음 ("행을 표시할 공간이 없습니다")
 
             var parts = new List<string>();
             if (responses.Count == 1)
@@ -2503,8 +2546,16 @@ namespace LcrLogger
                 }
             }
             lblLast.Text = "#" + rows.Count + "   " + (parts.Count > 0 ? string.Join("    ", parts) : string.Join(" | ", responses));
+            lblLast.ForeColor = Theme.Text;
+        }
 
-            WriteCsv(row);
+        // 측정 실패를 로그에만 남기면 눈에 띄지 않으므로 최근 측정값 칸에 빨간 글씨로 표시하고 경고음
+        void ShowFailure(string message)
+        {
+            string first = message.Split('\n')[0].Trim();
+            lblLast.Text = "측정 실패: " + (first.Length > 60 ? first.Substring(0, 60) + "..." : first);
+            lblLast.ForeColor = Theme.Red;
+            SystemSounds.Hand.Play();
         }
 
         void WriteCsv(string[] row)
@@ -2671,11 +2722,7 @@ namespace LcrLogger
             // 단축키를 누른 순간의 창(스프레드시트)에 입력. 이 프로그램 창이면 측정만 함.
             IntPtr target = KeyboardInput.GetForegroundWindow();
             List<string> responses = await MeasureOnce();
-            if (responses == null)
-            {
-                SystemSounds.Hand.Play();
-                return;
-            }
+            if (responses == null) return;   // 실패 경고음은 MeasureOnce(또는 연결 끊김 처리)에서 이미 냄
             if (target == Handle)
             {
                 Log("단축키: 이 프로그램 창이 선택되어 있어 측정만 했습니다.");
