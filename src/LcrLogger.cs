@@ -28,8 +28,8 @@ using Charting = System.Windows.Forms.DataVisualization.Charting;
 [assembly: System.Reflection.AssemblyProduct("LCR Logger")]
 [assembly: System.Reflection.AssemblyCompany("KIM YEONGDO")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 KIM YEONGDO")]
-[assembly: System.Reflection.AssemblyVersion("1.22.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.22.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.23.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.23.0.0")]
 
 namespace LcrLogger
 {
@@ -360,8 +360,9 @@ namespace LcrLogger
         public double BiasVolts;
         public string[] Pars = new string[4];   // PAR1~PAR4에 보낼 파라미터 (null이면 변경 안 함)
         public int Average;        // 평균 횟수 1~256, 0이면 변경 안 함 (복소 투자율 측정에서 사용)
+        public List<KeyValuePair<string, string>> Extra = new List<KeyValuePair<string, string>>();   // 그 밖의 설정 (명령, 값), 예: (":RANG", "5")
 
-        public bool Any { get { return Level != null || Speed != null || Bias != 0 || Average > 0 || Pars.Any(p => p != null); } }
+        public bool Any { get { return Level != null || Speed != null || Bias != 0 || Average > 0 || Extra.Count > 0 || Pars.Any(p => p != null); } }
 
         static string ParKey(int i) { return ":PARameter" + (i + 1); }
 
@@ -408,6 +409,13 @@ namespace LcrLogger
             }
             if (Bias != 0) s[":DCBias"] = m.Query(":DCBias?");
             if (Bias == 2) s[":DCBias:LEVel"] = m.Query(":DCBias:LEVel?");
+            foreach (var kv in Extra)
+            {
+                s[kv.Key] = m.Query(kv.Key + "?").Trim();
+                // 레인지 번호와 AUTO는 같이 되돌려야 원래 상태가 됨
+                if (kv.Key == ":RANG" || kv.Key == ":RANG:AUTO")
+                    foreach (string k in new[] { ":RANG", ":RANG:AUTO" }) s[k] = m.Query(k + "?").Trim();
+            }
             return s;
         }
 
@@ -469,6 +477,16 @@ namespace LcrLogger
                 m.Send(":DCBias OFF");
                 log.Add("측정 조건: DC 바이어스 " + m.Query(":DCBias?"));
             }
+            foreach (var kv in Extra)
+            {
+                m.Send(kv.Key + " " + kv.Value);
+                string got = m.Query(kv.Key + "?").Trim();
+                SettingItem item = MeterSettings.Items.FirstOrDefault(i => i.Cmd == kv.Key);
+                double a, b;
+                bool ok = string.Equals(got, kv.Value, StringComparison.OrdinalIgnoreCase)
+                    || (Fmt.TryParse(got, out a) && Fmt.TryParse(kv.Value, out b) && Math.Abs(a - b) <= Math.Abs(b) * 1e-3 + 1e-12);
+                log.Add("측정 조건: " + (item != null ? item.Name : kv.Key) + " " + got + (ok ? "" : "  ※ 계측기가 값을 받지 않았습니다 (보낸 값 " + kv.Value + "). 허용 범위를 확인하세요."));
+            }
             return log;
         }
 
@@ -478,10 +496,11 @@ namespace LcrLogger
             return modeOk && Fmt.TryParse(response, out got) && Math.Abs(got - wanted) <= tolerance;
         }
 
-        // 복원 순서 (Apply의 반대): 주파수·트리거(스윕) → DC 바이어스 → 평균 → SPEED → 레벨 값 → 신호 종류 → PAR1~4
+        // 복원 순서 (Apply의 반대): 주파수·트리거(스윕) → 그 밖의 설정(값 먼저, ON/OFF·AUTO 나중) → DC 바이어스 → 평균 → SPEED → 레벨 값 → 신호 종류 → PAR1~4
         static readonly string[] RestoreOrder =
         {
-            ":FREQ", ":TRIG", ":DCBias:LEVel", ":DCBias", ":AVER", ":SPEEd", ":LEVel:VOLTage", ":LEVel:CVOLTage", ":LEVel:CCURRent", ":LEVel",
+            ":FREQ", ":TRIG", ":TRIG:DEL", ":SSO:WAIT", ":SSO", ":LIM:VOLT", ":LIM:CURR", ":LIM", ":RANG:LOWZ", ":RANG", ":RANG:AUTO",
+            ":DCR:DCD", ":DCR:ADJD", ":DCR:LFR", ":DCBias:LEVel", ":DCBias", ":AVER", ":SPEEd", ":LEVel:VOLTage", ":LEVel:CVOLTage", ":LEVel:CCURRent", ":LEVel",
             ":PARameter1", ":PARameter2", ":PARameter3", ":PARameter4",
             ":DCR:RANG", ":DCR:RANG:AUTO"   // :DCR:RANG n 은 HOLD로 바꾸므로 AUTO를 마지막에
         };
@@ -1387,7 +1406,7 @@ namespace LcrLogger
             new SettingItem("리밋 전압 [V]", ":LIM:VOLT", "0.005 ~ 5"),
             new SettingItem("리밋 전류 [A]", ":LIM:CURR", "0.00001 ~ 0.05"),
             new SettingItem("자동 레인지", ":RANG:AUTO", "OFF면 아래 레인지로 고정 (HOLD)", OnOff),
-            new SettingItem("레인지", ":RANG", "1=100mΩ 2=1Ω 3=10Ω 4=100Ω 5=1kΩ 6=10kΩ 7=100kΩ 8=1MΩ 9=10MΩ 10=100MΩ", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"),
+            new SettingItem("레인지", ":RANG", "번호로 보냄 (괄호는 범위 이름)", "1 (100mΩ)", "2 (1Ω)", "3 (10Ω)", "4 (100Ω)", "5 (1kΩ)", "6 (10kΩ)", "7 (100kΩ)", "8 (1MΩ)", "9 (10MΩ)", "10 (100MΩ)"),
             new SettingItem("LOW Z 모드", ":RANG:LOWZ", "저임피던스 고정밀 모드", OnOff),
             new SettingItem("SPEED", ":SPEEd", "느릴수록 정확", "FAST", "MEDIUM", "SLOW", "SLOW2"),
             new SettingItem("평균 횟수", ":AVER", "1 ~ 256 (1 = OFF)"),
@@ -2119,6 +2138,11 @@ namespace LcrLogger
         const string PresetPrefix = "Preset.";
         Label lblLevelUnit;
         TextBox txtCv, txtBias;                     // txtCv: 측정 신호 레벨 값 (V 또는 mA)
+        // 측정 조건의 그 밖의 항목: 명령 → 입력 칸(빈칸) 또는 선택 상자("변경 안 함" + 계측기 설정 탭과 같은 선택지)
+        static readonly string[] CondExtraKeys = { ":FREQ", ":RANG:AUTO", ":RANG", ":RANG:LOWZ", ":AVER", ":LIM", ":LIM:VOLT", ":LIM:CURR",
+            ":TRIG:DEL", ":SSO", ":SSO:WAIT", ":DCR:DCD", ":DCR:ADJD", ":DCR:LFR" };
+        readonly Dictionary<string, Control> condExtra = new Dictionary<string, Control>();
+        Switch chkRestoreCond;
         MeasCond connectCond;                       // 연결할 때 적용한 측정 조건 (재연결 때 다시 보냄)
         Dictionary<string, string> savedCond;       // 바꾸기 전 계측기 값 (연결 해제할 때 복원)
         Button btnRefresh, btnConnect, btnMeasure, btnAuto, btnFolder, btnOpenFolder, btnNewFile, btnExport, btnClear, btnSend, btnUpdate;
@@ -2345,7 +2369,7 @@ namespace LcrLogger
             layout.Controls.Add(multi.Parent);
 
             // 측정 조건: 연결할 때 보내고, 연결을 해제하면 원래 값으로 복원. 모든 주파수에 같은 조건 적용
-            var cond = Group("측정 조건 (연결 전에 설정 · 연결 해제하면 계측기 값을 원래대로 복원)");
+            var cond = Group("측정 조건 (연결 전에 설정)");
             cbLevel = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 120 };
             cbLevel.Items.AddRange(new object[] { "변경 안 함", "V (개방전압)", "CV (정전압)", "CC (정전류)" });
             cbLevel.SelectedIndex = 0;
@@ -2382,6 +2406,29 @@ namespace LcrLogger
             }
             Add(cond, parRow.ToArray());
             cond.SetFlowBreak(cbPar[cbPar.Length - 1], true);
+            foreach (string key in CondExtraKeys)
+            {
+                SettingItem item = MeterSettings.Items.First(i => i.Cmd == key);
+                Control c;
+                if (item.Choices != null)
+                {
+                    var cb = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = key == ":RANG" ? 110 : 100 };
+                    cb.Items.Add("변경 안 함");
+                    cb.Items.AddRange(item.Choices);
+                    cb.SelectedIndex = 0;
+                    c = cb;
+                }
+                else c = new TextBox { Width = 70 };
+                condExtra[key] = c;
+                Add(cond, Lbl(key == ":FREQ" ? "주파수 [Hz] (다중 주파수 끌 때)" : item.Name), c);
+            }
+            var extraHint = Lbl("빈칸·\"변경 안 함\"은 계측기 값을 그대로 둠 · 범위는 [계측기 설정] 탭 설명 참고");
+            extraHint.ForeColor = Theme.Secondary;
+            Add(cond, extraHint);
+            cond.SetFlowBreak(extraHint, true);
+            chkRestoreCond = new Switch { Text = "연결 해제하면 계측기 측정 조건을 연결 전 값으로 되돌림 (끄면 바꾼 조건을 계측기에 그대로 둠)", Margin = new Padding(3, 4, 8, 3) };
+            cond.Controls.Add(chkRestoreCond);
+            cond.SetFlowBreak(chkRestoreCond, true);
 
             // 프리셋: 이름을 입력하고 [저장], 목록에서 고르면 불러옴. 연결 중이면 [적용]으로 계측기에 반영
             cbPreset = new ComboBox { DropDownStyle = ComboBoxStyle.DropDown, Width = 170 };
@@ -2654,6 +2701,8 @@ namespace LcrLogger
             cbSpeed.SelectedIndex = settings.GetInt("CondSpeed", 0, 0, cbSpeed.Items.Count - 1);
             cbBias.SelectedIndex = settings.GetInt("CondBias", 0, 0, cbBias.Items.Count - 1);
             txtBias.Text = settings.Get("BiasVolts", txtBias.Text);
+            foreach (string key in CondExtraKeys) SetExtra(key, settings.Get("Cond" + key, ""));
+            chkRestoreCond.Checked = settings.Get("RestoreOnClose", "1") == "1";
             cbHotkey.SelectedIndex = settings.GetInt("SheetHotkey", 3, 0, HotkeyChoices.Length - 1);
             cbSheetValues.SelectedIndex = settings.GetInt("SheetValues", 0, 0, 1);
             cbSheetSep.SelectedIndex = settings.GetInt("SheetSep", 0, 0, 1);
@@ -2681,6 +2730,8 @@ namespace LcrLogger
             settings.Set("CondSpeed", cbSpeed.SelectedIndex.ToString(CultureInfo.InvariantCulture));
             settings.Set("CondBias", cbBias.SelectedIndex.ToString(CultureInfo.InvariantCulture));
             settings.Set("BiasVolts", txtBias.Text.Trim());
+            foreach (string key in CondExtraKeys) settings.Set("Cond" + key, GetExtra(key));
+            settings.Set("RestoreOnClose", chkRestoreCond.Checked ? "1" : "0");
             settings.Set("SheetHotkey", cbHotkey.SelectedIndex.ToString(CultureInfo.InvariantCulture));
             settings.Set("SheetValues", cbSheetValues.SelectedIndex.ToString(CultureInfo.InvariantCulture));
             settings.Set("SheetSep", cbSheetSep.SelectedIndex.ToString(CultureInfo.InvariantCulture));
@@ -2863,9 +2914,51 @@ namespace LcrLogger
         }
 
         // 화면의 측정 조건을 읽음. 잘못된 입력이면 연결 전에 알려 줌
+        // 그 밖의 항목 칸의 값 (빈칸·변경 안 함이면 "")
+        string GetExtra(string key)
+        {
+            var cb = condExtra[key] as ComboBox;
+            return cb != null ? (cb.SelectedIndex <= 0 ? "" : Fmt.ParToken((string)cb.SelectedItem)) : condExtra[key].Text.Trim();
+        }
+
+        void SetExtra(string key, string value)
+        {
+            var cb = condExtra[key] as ComboBox;
+            if (cb == null) { condExtra[key].Text = value; return; }
+            int index = 0;
+            for (int i = 1; i < cb.Items.Count; i++)
+                if (Fmt.ParToken((string)cb.Items[i]) == value) index = i;
+            cb.SelectedIndex = index;
+        }
+
         MeasCond ReadCond()
         {
             var c = new MeasCond();
+            foreach (string key in CondExtraKeys)
+            {
+                string v = GetExtra(key);
+                if (v.Length == 0) continue;
+                string name = MeterSettings.Items.First(i => i.Cmd == key).Name;
+                double x;
+                if (key == ":FREQ")
+                {
+                    if (!Fmt.TryParseFrequency(v, out x)) throw new InvalidOperationException("주파수 '" + v + "'를 읽을 수 없습니다. 4 Hz ~ 8 MHz 범위로 입력하세요 (예: 1k, 100k, 1M).");
+                    v = x.ToString("F2", CultureInfo.InvariantCulture);
+                }
+                else if (key == ":AVER")
+                {
+                    int n;
+                    if (!int.TryParse(v, out n) || n < 1 || n > 256) throw new InvalidOperationException("평균 횟수 '" + v + "'를 읽을 수 없습니다. 1 ~ 256으로 입력하세요 (1 = OFF).");
+                    c.Average = n;
+                    continue;
+                }
+                else if (!(condExtra[key] is ComboBox))
+                {
+                    if (!Fmt.TryParse(v, out x) || x < 0) throw new InvalidOperationException(name + " 값 '" + v + "'를 읽을 수 없습니다. 0 이상의 숫자로 입력하세요.");
+                    v = x.ToString("G6", CultureInfo.InvariantCulture);
+                }
+                c.Extra.Add(new KeyValuePair<string, string>(key, v));
+            }
             if (cbLevel.SelectedIndex > 0)
             {
                 string[] modes = { null, "V", "CV", "CC" };
@@ -3049,6 +3142,8 @@ namespace LcrLogger
             };
             for (int i = 0; i < cbPar.Length; i++)
                 parts.Add("P" + (i + 2) + "=" + ItemToken(cbPar[i]));
+            foreach (string key in CondExtraKeys)
+                parts.Add("X" + key + "=" + GetExtra(key).Replace(";", ""));
             return string.Join(";", parts);
         }
 
@@ -3071,6 +3166,8 @@ namespace LcrLogger
             if (d.TryGetValue("BV", out v) && v.Length > 0) txtBias.Text = v;
             for (int i = 0; i < cbPar.Length; i++)
                 SelectToken(cbPar[i], d, "P" + (i + 2));
+            foreach (string key in CondExtraKeys)
+                SetExtra(key, d.TryGetValue("X" + key, out v) ? v : "");   // 1.22 이전 프리셋에는 없음 → 변경 안 함
             Log("프리셋 불러옴: " + name + (meter != null ? " - [연결 중 적용]을 눌러야 계측기에 반영됩니다." : ""));
         }
 
@@ -3185,6 +3282,12 @@ namespace LcrLogger
                     // 스윕(복소 투자율·스윕 측정) 직전 값으로 먼저 되돌림 (실패하면 파일에 남은 값으로 다음 연결 때 묻습니다)
                     try { MeasCond.Restore(meter, muSaved); muSaved = null; PersistPending(); Log("스윕 측정 전 계측기 설정으로 되돌렸습니다."); }
                     catch (Exception ex) { Log("스윕 측정 전 설정 복원 실패: " + ex.Message); }
+                }
+                if (restore && savedCond != null && connectCond != null && !chkRestoreCond.Checked)
+                {
+                    savedCond = null;
+                    PersistPending();
+                    Log("측정 조건을 계측기에 그대로 둡니다 (연결 해제 때 되돌리기 꺼짐).");
                 }
                 if (restore && savedCond != null && connectCond != null)
                 {
@@ -4802,6 +4905,7 @@ namespace LcrLogger
             cbPreset.Enabled = btnPresetSave.Enabled = btnPresetDelete.Enabled = condEditable;
             btnApplyCond.Enabled = connected && condEditable;
             cbLevel.Enabled = txtCv.Enabled = cbSpeed.Enabled = cbBias.Enabled = txtBias.Enabled = condEditable;
+            foreach (Control c in condExtra.Values) c.Enabled = condEditable;
             foreach (TextBox t in txtFreq) t.Enabled = editable;
             chkTrg.Enabled = freqs.Count == 0 || !connected;
             btnMeasure.Enabled = connected && !busy && !autoRunning;
@@ -4899,6 +5003,18 @@ namespace LcrLogger
                     Check(string.Join("|", condKeys.Select(k => m.Query(k))) == before, "측정 신호 " + lv + " 복원");
                 }
                 output.AppendLine("측정 조건 로그: " + string.Join(" / ", condLog));
+
+                // 그 밖의 설정: 레인지 HOLD 5, 리밋 전압, 트리거 지연 → 복원하면 AUTO·원래 값으로
+                string[] exKeys = { ":RANG?", ":RANG:AUTO?", ":LIM:VOLT?", ":TRIG:DEL?", ":DCR:LFR?" };
+                string exBefore = string.Join("|", exKeys.Select(k => m.Query(k)));
+                var ex = new MeasCond();
+                foreach (var kv in new[] { ":RANG:AUTO OFF", ":RANG 5", ":LIM:VOLT 1", ":TRIG:DEL 0.1", ":DCR:LFR 50" })
+                    ex.Extra.Add(new KeyValuePair<string, string>(kv.Split(' ')[0], kv.Split(' ')[1]));
+                var exSaved = ex.Read(m);
+                List<string> exLog = ex.Apply(m);
+                Check(ex.Any && m.Query(":RANG?") == "5" && m.Query(":RANG:AUTO?") == "OFF" && exLog.Count == 5 && exLog.All(l => !l.Contains("※")), "그 밖의 측정 조건 적용 " + string.Join(" / ", exLog));
+                MeasCond.Restore(m, MeasCond.Deserialize(MeasCond.Serialize(exSaved)));
+                Check(string.Join("|", exKeys.Select(k => m.Query(k))) == exBefore, "그 밖의 측정 조건 복원");
 
                 // 비정상 종료 대비: 원래 값을 문자열로 저장했다가 다시 읽어 되돌릴 수 있는지
                 var crash = new MeasCond { Level = "CC", LevelValue = 0.01, Speed = "FAST", Bias = 2, BiasVolts = 2, Pars = new[] { "LS", "CP", "D", "Q" } };
