@@ -110,7 +110,7 @@ CSV 파일은 엑셀에서 바로 열 수 있고, 구글 스프레드시트에�
 
 **통신 순서** (HIOKI 샘플 앱 `Form_LCR_Sweep`을 디컴파일해 확인한 순서와 같음)
 1. 측정 전 값을 읽어 둡니다: `:PAR1~4?`, `:LEV?`, 레벨 값, `:SPEE?`, `:AVER?`, `:FREQ?`, `:TRIG?`
-2. 측정 조건을 보냅니다: PAR2~4 OFF → `:PAR1 Z`, `:PAR2 PHASE` → 레벨·SPEED·`:AVER n` → `:TRIG EXT`
+2. 측정 조건을 보냅니다: PAR2~4 OFF → `:PAR1 Z`, `:PAR2 PHASE` → 레벨·SPEED·`:AVER n` → `:TRIG EXT` (평균은 공식 앱처럼 줄임말 `:AVER`만 씀. 실기에서 `:AVERage?`는 응답하지 않음)
 3. `*ESR?`로 명령 오류(비트 56)를 확인합니다.
 4. 점마다 `:FREQ f`(소수 둘째 자리) → `*TRG;:MEAS?`(Z, θ) → `:MONI?`(AC V, I) 순서로 측정합니다.
 5. 끝나면 읽어 둔 값을 모두 되돌립니다.

@@ -28,8 +28,8 @@ using Charting = System.Windows.Forms.DataVisualization.Charting;
 [assembly: System.Reflection.AssemblyProduct("LCR Logger")]
 [assembly: System.Reflection.AssemblyCompany("KIM YEONGDO")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 KIM YEONGDO")]
-[assembly: System.Reflection.AssemblyVersion("1.13.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.13.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.14.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.14.0.0")]
 
 namespace LcrLogger
 {
@@ -374,9 +374,10 @@ namespace LcrLogger
             if (Speed != null) s[":SPEEd"] = m.Query(":SPEEd?");
             if (Average > 0)
             {
+                // 평균 명령은 공식 앱처럼 줄임말 :AVER 로 보냄 (실기에서 :AVERage? 는 응답 없음, 정식 이름은 :AVERaging)
                 // 평균 1회는 OFF로 답함 (HIOKI 샘플 앱과 같은 해석). 되돌릴 때는 공식 앱처럼 숫자로 보냄
-                string a = m.Query(":AVERage?").Trim();
-                s[":AVERage"] = a.ToUpperInvariant() == "OFF" ? "1" : a;
+                string a = m.Query(":AVER?").Trim();
+                s[":AVER"] = a.ToUpperInvariant() == "OFF" ? "1" : a;
             }
             if (Bias != 0) s[":DCBias"] = m.Query(":DCBias?");
             if (Bias == 2) s[":DCBias:LEVel"] = m.Query(":DCBias:LEVel?");
@@ -424,8 +425,8 @@ namespace LcrLogger
             if (Average > 0)
             {
                 string n = Average.ToString(CultureInfo.InvariantCulture);
-                m.Send(":AVERage " + n);
-                string got = m.Query(":AVERage?").Trim();
+                m.Send(":AVER " + n);
+                string got = m.Query(":AVER?").Trim();
                 bool ok = got == n || (Average == 1 && got.ToUpperInvariant() == "OFF");
                 log.Add("측정 조건: 평균 " + got + (ok ? "" : "  ※ 계측기가 값을 받지 않았습니다."));
             }
@@ -453,7 +454,7 @@ namespace LcrLogger
         // 복원 순서 (Apply의 반대): 주파수·트리거(스윕) → DC 바이어스 → 평균 → SPEED → 레벨 값 → 신호 종류 → PAR1~4
         static readonly string[] RestoreOrder =
         {
-            ":FREQ", ":TRIG", ":DCBias:LEVel", ":DCBias", ":AVERage", ":SPEEd", ":LEVel:VOLTage", ":LEVel:CVOLTage", ":LEVel:CCURRent", ":LEVel",
+            ":FREQ", ":TRIG", ":DCBias:LEVel", ":DCBias", ":AVER", ":SPEEd", ":LEVel:VOLTage", ":LEVel:CVOLTage", ":LEVel:CCURRent", ":LEVel",
             ":PARameter1", ":PARameter2", ":PARameter3", ":PARameter4"
         };
 
@@ -552,7 +553,8 @@ namespace LcrLogger
             else if (c.StartsWith(":LEVEL:CCURRENT ")) ccurr = c.Substring(16);
             else if (c.StartsWith(":LEVEL ")) level = c.Substring(7);
             if (c.StartsWith(":SPEED ")) speed = c.Substring(7) == "MED" ? "MEDIUM" : c.Substring(7);
-            if (Regex.IsMatch(c, @"^:AVER(AGE)? ")) aver = c.Substring(c.IndexOf(' ') + 1).Trim() == "1" ? "OFF" : c.Substring(c.IndexOf(' ') + 1).Trim();
+            // 실제 IM3536처럼 :AVER / :AVERAGING 만 받음 (:AVERAGE 는 모르는 명령)
+            if (Regex.IsMatch(c, @"^:AVER(AGING)? ")) aver = c.Substring(c.IndexOf(' ') + 1).Trim() == "1" ? "OFF" : c.Substring(c.IndexOf(' ') + 1).Trim();
             if (c.StartsWith(":DCBIAS:LEVEL ")) dclevel = c.Substring(14);
             else if (c.StartsWith(":DCBIAS ")) dcbias = c.Substring(8);
         }
@@ -573,7 +575,7 @@ namespace LcrLogger
             if (c == ":SPEED?") return speed;
             if (c == ":DCBIAS?") return dcbias;
             if (c == ":DCBIAS:LEVEL?") return dclevel;
-            if (c == ":AVER?" || c == ":AVERAGE?") return aver;
+            if (c == ":AVER?" || c == ":AVERAGING?") return aver;
             if (c == "*ESR?") return "0";
             if (c == ":MONI?")
             {
