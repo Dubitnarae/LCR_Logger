@@ -28,8 +28,8 @@ using Charting = System.Windows.Forms.DataVisualization.Charting;
 [assembly: System.Reflection.AssemblyProduct("LCR Logger")]
 [assembly: System.Reflection.AssemblyCompany("KIM YEONGDO")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 KIM YEONGDO")]
-[assembly: System.Reflection.AssemblyVersion("1.19.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.19.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.20.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.20.0.0")]
 
 namespace LcrLogger
 {
@@ -4112,8 +4112,9 @@ namespace LcrLogger
             {
                 var lines = new List<string>();
                 double r;
+                SetTimeout(m, 60000);   // DC 자동 레인지는 레인지를 몇 번 바꾸며 재므로 한 번에 5초를 넘길 수 있음
                 try { r = await Io(() => Permeability.MeasureRdc(m, lines)); }
-                finally { foreach (string l in lines) Log(l); }
+                finally { SetTimeout(m, 5000); foreach (string l in lines) Log(l); }
                 txtRw.Text = r.ToString("G6", CultureInfo.InvariantCulture);
                 Log("DCR 측정: Rw = " + txtRw.Text + " Ω (계측기 설정은 원래대로 되돌림)");
             }
