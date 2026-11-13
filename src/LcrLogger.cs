@@ -28,8 +28,8 @@ using Charting = System.Windows.Forms.DataVisualization.Charting;
 [assembly: System.Reflection.AssemblyProduct("LCR Logger")]
 [assembly: System.Reflection.AssemblyCompany("KIM YEONGDO")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 KIM YEONGDO")]
-[assembly: System.Reflection.AssemblyVersion("1.14.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.14.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.15.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.15.0.0")]
 
 namespace LcrLogger
 {
@@ -512,6 +512,7 @@ namespace LcrLogger
         // OD 25 / ID 15 / h 10 mm, 10턴, 권선 저항 0.05 Ω. Z·θ·Rdc·모니터 값이 이 코어를 따름
         public const double CoreMuI = 10000, CoreFc = 200e3, CoreOD = 25, CoreID = 15, CoreH = 10, CoreRw = 0.05;
         public const int CoreN = 10;
+        internal static int RdcNoValueCount;   // 자체 점검용: Rdc를 이 횟수만큼 "측정값 없음"(-9.99999E+33)으로 답함
 
         public static void CoreImpedance(double f, out double z, out double thetaDeg)
         {
@@ -601,7 +602,7 @@ namespace LcrLogger
                 foreach (string p in pars)
                 {
                     if (p == "OFF") continue;
-                    double v = p == "LS" || p == "LP" ? l : p == "Q" ? q : p == "D" ? 1 / q : p == "PHASE" ? cth : p == "Z" ? cz : p == "RDC" ? CoreRw : 2 * Math.PI * freq * l;
+                    double v = p == "LS" || p == "LP" ? l : p == "Q" ? q : p == "D" ? 1 / q : p == "PHASE" ? cth : p == "Z" ? cz : p == "RDC" ? (RdcNoValueCount-- > 0 ? -9.99999E+33 : CoreRw) : 2 * Math.PI * freq * l;
                     values.Add(v.ToString("0.00000E+00", CultureInfo.InvariantCulture));
                 }
                 return string.Join(",", values);
@@ -965,8 +966,36 @@ namespace LcrLogger
 
         static double Num(string[] tokens, int i)
         {
+            return i < tokens.Length ? Value(tokens[i]) : double.NaN;
+        }
+
+        // 계측기 응답 숫자. ±9.99999E+33은 HIOKI의 "측정값 없음" 표시(공식 앱은 --- / DISP OUT으로 보여 줌) → NaN
+        public static double Value(string token)
+        {
             double v;
-            return i < tokens.Length && Fmt.TryParse(tokens[i], out v) ? v : double.NaN;
+            return Fmt.TryParse(token.Trim(), out v) && Math.Abs(v) < 1e33 ? v : double.NaN;
+        }
+
+        // 권선 저항: PAR1을 잠시 Rdc로 바꿔 측정. 설정을 바꾼 직후에는 값이 없을 수 있어 최대 3번 다시 잼
+        public static double MeasureRdc(IMeter m, List<string> log)
+        {
+            var saved = ApplyTemp(m, new MeasCond { Pars = new[] { "RDC", "OFF", "OFF", "OFF" } }, log);
+            try
+            {
+                string resp = "";
+                for (int i = 0; i < 3; i++)
+                {
+                    if (i > 0) Thread.Sleep(200);
+                    resp = m.Query("*TRG;:MEAS?");
+                    double r = Value(Fmt.Tokens(resp)[0]);
+                    if (!double.IsNaN(r)) return r;
+                    log.Add("Rdc 응답 " + resp + " (측정값 없음) - 다시 잽니다.");
+                }
+                throw new InvalidOperationException("계측기가 Rdc 값을 주지 않았습니다 (응답 " + resp + " = 측정값 없음).\n"
+                    + "코일이 측정 단자에 연결되어 있는지, 계측기에서 직접 Rdc를 골랐을 때 값이 나오는지 확인하세요.\n"
+                    + "값이 나오지 않으면 멀티미터 등으로 잰 값을 Rw 칸에 직접 입력하세요.");
+            }
+            finally { MeasCond.Restore(m, saved); }
         }
 
         public static List<string> Warnings(List<MuRow> rows)
@@ -3514,19 +3543,9 @@ namespace LcrLogger
             try
             {
                 var lines = new List<string>();
-                string resp;
-                try
-                {
-                    resp = await Io(() =>
-                    {
-                        var saved = Permeability.ApplyTemp(m, new MeasCond { Pars = new[] { "RDC", "OFF", "OFF", "OFF" } }, lines);
-                        try { return m.Query("*TRG;:MEAS?"); }
-                        finally { MeasCond.Restore(m, saved); }
-                    });
-                }
-                finally { foreach (string l in lines) Log(l); }
                 double r;
-                if (!Fmt.TryParse(Fmt.Tokens(resp)[0], out r)) throw new InvalidOperationException("Rdc 응답을 읽을 수 없습니다: " + resp);
+                try { r = await Io(() => Permeability.MeasureRdc(m, lines)); }
+                finally { foreach (string l in lines) Log(l); }
                 txtRw.Text = r.ToString("G6", CultureInfo.InvariantCulture);
                 Log("DCR 측정: Rw = " + txtRw.Text + " Ω (계측기 설정은 원래대로 되돌림)");
             }
@@ -3786,6 +3805,17 @@ namespace LcrLogger
             MuRow known = Permeability.Calc(f0, Math.Sqrt(rs * rs + xs * xs), Math.Atan2(xs, rs) * 180 / Math.PI, 0.05, 10, le / 1000, ae / 1e6);
             Check(Near(known.Mu1, 10000, 1e-9) && Near(known.Mu2, 2000, 1e-9) && Near(known.TanD, 0.2, 1e-9) && Near(known.Ls, ls, 1e-9) && Near(known.Rs, rs, 1e-9),
                 "알려진 L, R → μ′=" + known.Mu1 + ", μ″=" + known.Mu2);
+
+            Check(double.IsNaN(Permeability.Value("-9.99999E+33")) && double.IsNaN(Permeability.Value("9.99999E+33")) && Permeability.Value(" 5.1200E-02") == 0.0512, "측정값 없음(±9.99999E+33) 처리");
+            Check(Near(Permeability.MeasureRdc(m, new List<string>()), DemoMeter.CoreRw, 1e-9) && m.Query(":PAR1?") != "RDC", "DCR 측정 후 PAR 복원");
+            DemoMeter.RdcNoValueCount = 2;   // 설정 직후 두 번은 값 없음 → 세 번째에 받음
+            var rdcLog = new List<string>();
+            Check(Near(Permeability.MeasureRdc(m, rdcLog), DemoMeter.CoreRw, 1e-9) && rdcLog.Count(l => l.Contains("다시 잽니다")) == 2, "Rdc 값 없음이면 다시 잼");
+            DemoMeter.RdcNoValueCount = 5;
+            bool noRdc = false;
+            try { Permeability.MeasureRdc(m, new List<string>()); } catch (InvalidOperationException) { noRdc = true; }
+            DemoMeter.RdcNoValueCount = 0;
+            Check(noRdc && m.Query(":PAR1?") != "RDC", "Rdc 값이 끝내 없으면 오류, PAR 복원");
 
             List<double> fl = Permeability.Frequencies(1e3, 8e6, 100, true);
             Check(fl.Count == 100 && fl[0] == 1e3 && fl[99] == 8e6 && Near(fl[1] / fl[0], Math.Pow(8000, 1 / 99.0), 1e-4), "로그 간격 주파수");
