@@ -8,7 +8,7 @@ powershell -NoProfile -Command ^
   "if (Test-Path $stage) { Remove-Item -Recurse -Force $stage };" ^
   "New-Item -ItemType Directory -Force $stage | Out-Null;" ^
   "Copy-Item (Join-Path $root 'LCR_Logger.exe') $stage;" ^
-  "Get-ChildItem -LiteralPath $root -Filter *.txt | Copy-Item -Destination $stage;" ^
+  "Get-ChildItem -LiteralPath $root -Filter *.txt | Where-Object { $_.Name -ne 'selftest_out.txt' } | Copy-Item -Destination $stage;" ^
   "if (Test-Path $zip) { Remove-Item -Force $zip };" ^
   "Compress-Archive -Path $stage -DestinationPath $zip;" ^
   "Write-Host ('RELEASE OK: '+$zip)"

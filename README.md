@@ -22,7 +22,8 @@ CSV 파일은 엑셀에서 바로 열 수 있고, 구글 스프레드시트에�
 
 1. `src\LcrLogger.cs`의 `AssemblyVersion`/`AssemblyFileVersion`을 올립니다(예: `1.5.0.0`).
 2. 변경을 커밋하고 `git push`합니다.
-3. `publish_release.bat "변경 내용"`을 실행합니다. 빌드 → zip 생성 → `gh release create v1.5`로 zip을 올립니다.
+3. `make_release.bat`으로 zip을 만들고 `gh release create v1.5 release\LCR_Logger_v1.5.zip --title "LCR Logger 1.5" --notes "변경 내용"`으로 올립니다.
+   (한글 릴리스 문구는 cmd에서 깨지므로 PowerShell·Git Bash에서 `gh`를 직접 실행합니다.)
    웹에서 직접 올릴 때도 태그 `v1.5`로 릴리스를 만들고 `release\LCR_Logger_v1.5.zip` 하나만 첨부하면 됩니다.
 
 저장소는 공개(public)여야 프로그램이 로그인 없이 릴리스를 받을 수 있습니다.
@@ -33,10 +34,9 @@ CSV 파일은 엑셀에서 바로 열 수 있고, 구글 스프레드시트에�
 |---|---|
 | `LCR_Logger.exe` | 실행 파일. 설치 없이 더블클릭으로 실행합니다. 저장소에는 없으며, [릴리스](https://github.com/Dubitnarae/LCR_Logger/releases/latest)의 zip에서 받거나 `build.bat`으로 빌드합니다. |
 | `data\` | 측정 데이터(CSV)가 저장되는 기본 폴더. 첫 측정 때 자동으로 만들어집니다. |
-| `src\LcrLogger.cs` | 소스 코드 |
+| `src\*.cs` | 소스 코드. `LcrLogger.cs`(시작·버전), `MainForm*.cs`(화면: 기본·연결·측정·복소 투자율·나머지 탭), `Meters.cs`(USB/RS-232C·LAN·GPIB·데모 계측기), `Fmt.cs`(표시·CSV), `Permeability.cs`, `Sweep.cs`, `MeterSettings.cs`, `Im3536Calc.cs`, `Updater.cs`, `Controls.cs`(화면 부품), `SelfTest.cs` 등 |
 | `build.bat` | 소스를 고친 뒤 다시 빌드할 때 실행합니다. |
 | `make_release.bat` | 빌드한 뒤 배포용 `release\LCR_Logger_v<버전>.zip`을 만듭니다. zip에는 exe와 `사용설명서.txt`가 들어갑니다. |
-| `publish_release.bat` | `make_release.bat` 후 GitHub 릴리스를 만들어 자동 업데이트로 배포합니다. |
 | `icon.ico`, `make_icon.py` | 프로그램 아이콘(파란 바탕 + 흰 코일 + 노란 기록 그래프). 바꾸려면 `python make_icon.py`(Pillow 필요)로 다시 만든 뒤 빌드합니다. |
 | `사용설명서.txt` | 측정 PC 사용자용 설명서. 배포 zip에 포함됩니다. |
 
