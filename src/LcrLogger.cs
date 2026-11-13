@@ -29,8 +29,8 @@ using Charting = System.Windows.Forms.DataVisualization.Charting;
 [assembly: System.Reflection.AssemblyProduct("LCR Logger")]
 [assembly: System.Reflection.AssemblyCompany("KIM YEONGDO")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 KIM YEONGDO")]
-[assembly: System.Reflection.AssemblyVersion("1.25.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.25.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.26.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.26.0.0")]
 
 namespace LcrLogger
 {
@@ -1116,6 +1116,8 @@ namespace LcrLogger
             else
                 foreach (string f in frequencyLabels)
                     fields.AddRange(pars.Select(p => Header(p, inductanceUnit, f)));
+            fields.Add("모니터 V,I");
+            fields.Add("레벨 경고");
             fields.Add("원본응답");
             return fields;
         }
@@ -1125,7 +1127,8 @@ namespace LcrLogger
             return response.Split(',').Select(t => t.Trim()).ToArray();
         }
 
-        public static string[] RowFields(int no, DateTime time, string memo, string condition, List<string> pars, List<string> responses, int inductanceUnit)
+        // moni: 주파수별 :MONI? 응답("V,I")을 " | "로 이은 것, warn: 측정 신호가 설정과 다를 때 경고
+        public static string[] RowFields(int no, DateTime time, string memo, string condition, List<string> pars, List<string> responses, int inductanceUnit, string moni = "", string warn = "")
         {
             var fields = new List<string>
             {
@@ -1140,6 +1143,8 @@ namespace LcrLogger
                 for (int i = 0; i < pars.Count; i++)
                     fields.Add(i < tokens.Length ? CellValue(pars[i], tokens[i], inductanceUnit) : "");
             }
+            fields.Add(moni);
+            fields.Add(warn);
             fields.Add(string.Join(" | ", responses));
             return fields.ToArray();
         }
@@ -1185,13 +1190,14 @@ namespace LcrLogger
     {
         public double F, Z, Theta, Rs, Ls, Mu1, Mu2, TanD, V = double.NaN, I = double.NaN;
         public string Raw;   // 계측기 응답 원문 (":MEAS? | :MONI?")
+        public string Warn = "";   // 측정 신호가 설정과 다를 때 (Permeability.LevelWarning)
     }
 
     static class Permeability
     {
         public const double Mu0 = 4e-7 * Math.PI;
 
-        public static readonly string[] DataHeader = { "f [Hz]", "Z [Ω]", "θ [°]", "Rs [Ω]", "Ls [H]", "μ′", "μ″", "tanδ", "Vmoni [V]", "Imoni [A]" };
+        public static readonly string[] DataHeader = { "f [Hz]", "Z [Ω]", "θ [°]", "Rs [Ω]", "Ls [H]", "μ′", "μ″", "tanδ", "Vmoni [V]", "Imoni [A]", "레벨 경고" };
 
         // 코어 치수 [mm] → 유효 자로 길이 le [mm], 유효 단면적 Ae [mm²]
         public static double Le(double od, double id) { return Math.PI * (od - id) / Math.Log(od / id); }
@@ -1349,10 +1355,56 @@ namespace LcrLogger
                                    : " - 측정 레벨이 설정과 다릅니다"));
                 }
             }
+            else if (cond != null && cond.Level == "CV" && cur.Any(r => LevelWarning("CV", cond.LevelValue, r.V, r.I).Length > 0))
+            {
+                var bad = cur.Where(r => LevelWarning("CV", cond.LevelValue, r.V, r.I).Length > 0).ToList();
+                w.Add("설정 전압을 유지하지 못함 (설정 " + Volt(cond.LevelValue) + ", Vmoni " + Volt(bad.Min(r => r.V)) + "~" + Volt(bad.Max(r => r.V)) + ", "
+                    + Fmt.FrequencyLabel(bad.First().F) + "~" + Fmt.FrequencyLabel(bad.Last().F) + ") - 시료 임피던스가 계측기 출력 한계를 넘었습니다. CC 모드나 다른 레벨로 재측정 권장");
+            }
             else if (cur.Count > 1 && cur.Any(r => Math.Abs(r.I / cur[0].I - 1) > 0.1))
                 w.Add("측정 레벨이 일정하지 않음 (Imoni가 시작값 " + Amps(cur[0].I) + "보다 ±10% 넘게 변함, 범위 "
                     + Amps(cur.Min(r => r.I)) + "~" + Amps(cur.Max(r => r.I)) + "), CC 모드 권장");
             return w;
+        }
+
+        static string Volt(double v) { return double.IsNaN(v) ? "?" : v.ToString("G3", CultureInfo.InvariantCulture) + " V"; }
+
+        // 한 점의 측정 신호를 설정과 비교: CC는 Imoni, CV는 Vmoni가 ±10% 넘게 벗어나면 경고 문장, 아니면 "".
+        // V(개방전압)는 계측기 출력 저항 때문에 시료 전압이 원래 설정보다 낮으므로 비교하지 않음
+        public static string LevelWarning(string mode, double set, double v, double i)
+        {
+            if (set <= 0) return "";
+            string vi = "Vmoni " + Volt(v) + ", Imoni " + (double.IsNaN(i) ? "?" : Amps(i));
+            if (mode == "CC" && !double.IsNaN(i))
+            {
+                if (i > set * 1.1) return "설정보다 전류가 많이 흐름 (설정 " + Amps(set) + ", " + vi + ")";
+                if (i < set * 0.9) return "설정 전류를 유지하지 못함 (설정 " + Amps(set) + ", " + vi + ")";
+            }
+            if (mode == "CV" && !double.IsNaN(v) && Math.Abs(v / set - 1) > 0.1)
+                return "설정 전압과 다름 (설정 " + Volt(set) + ", " + vi + ")";
+            return "";
+        }
+
+        // MeasCond.Summary 문장(예: "CC 20mA / SPEED ...")에서 신호 종류와 설정값(V 또는 A). 읽지 못하면 Level이 null
+        public static MeasCond LevelOf(string summary)
+        {
+            string[] p = (summary ?? "").Split('/')[0].Trim().Split(' ');
+            double v;
+            if (p.Length < 2 || !Fmt.TryParse(p[1].TrimEnd('A', 'V', 'm'), out v)) return new MeasCond();
+            return new MeasCond { Level = p[0], LevelValue = p[0] == "CC" ? v / 1000 : v };
+        }
+
+        // 주파수마다 받은 :MONI? 응답을 비교해 한 칸에 넣을 경고 (주파수가 여러 개면 앞에 주파수 표시)
+        public static string RowWarning(MeasCond c, List<string> monis, List<string> labels)
+        {
+            var w = new List<string>();
+            for (int k = 0; k < monis.Count; k++)
+            {
+                string[] t = Fmt.Tokens(monis[k]);
+                string s = LevelWarning(c.Level, c.LevelValue, t.Length > 0 ? Value(t[0]) : double.NaN, t.Length > 1 ? Value(t[1]) : double.NaN);
+                if (s.Length > 0) w.Add(k < labels.Count ? labels[k] + ": " + s : s);
+            }
+            return string.Join(" / ", w);
         }
 
         static string G(double v) { return double.IsNaN(v) ? "" : v.ToString("G7", CultureInfo.InvariantCulture); }
@@ -1364,7 +1416,7 @@ namespace LcrLogger
             lines.Add("");
             lines.Add(Fmt.CsvLine(DataHeader));
             foreach (MuRow r in rows)
-                lines.Add(Fmt.CsvLine(new[] { r.F, r.Z, r.Theta, r.Rs, r.Ls, r.Mu1, r.Mu2, r.TanD, r.V, r.I }.Select(G)));
+                lines.Add(Fmt.CsvLine(new[] { r.F, r.Z, r.Theta, r.Rs, r.Ls, r.Mu1, r.Mu2, r.TanD, r.V, r.I }.Select(G).Concat(new[] { r.Warn })));
             return lines;
         }
 
@@ -1457,7 +1509,7 @@ namespace LcrLogger
         public double X, V = double.NaN, I = double.NaN;
         public double[] Vals;
         public DateTime Time;
-        public string Raw;
+        public string Raw, Warn = "";
     }
 
     static class Sweep
@@ -1522,10 +1574,10 @@ namespace LcrLogger
         {
             var lines = info.Select(kv => Fmt.CsvLine(new[] { kv.Key, kv.Value })).ToList();
             lines.Add("");
-            lines.Add(Fmt.CsvLine(new[] { "반복", "No", Items[item] }.Concat(pars.Select(p => Fmt.Header(p, 0))).Concat(new[] { "Vmoni [V]", "Imoni [A]", "측정시각" })));
+            lines.Add(Fmt.CsvLine(new[] { "반복", "No", Items[item] }.Concat(pars.Select(p => Fmt.Header(p, 0))).Concat(new[] { "Vmoni [V]", "Imoni [A]", "측정시각", "레벨 경고" })));
             foreach (SweepRow r in rows)
                 lines.Add(Fmt.CsvLine(new[] { r.Rep.ToString(CultureInfo.InvariantCulture), r.No.ToString(CultureInfo.InvariantCulture), G(r.X) }
-                    .Concat(r.Vals.Select(G)).Concat(new[] { G(r.V), G(r.I), r.Time.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) })));
+                    .Concat(r.Vals.Select(G)).Concat(new[] { G(r.V), G(r.I), r.Time.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture), r.Warn })));
             return lines;
         }
 
@@ -2369,6 +2421,7 @@ namespace LcrLogger
 
         // 마지막 측정값 (다시 입력용)
         List<string> lastResponses, lastPars;
+        bool levelWarned;   // 직전 측정에 레벨 경고가 있었는지
         const int RepeatHotkeyId = 0x4C44;
         ComboBox cbHotkey, cbSheetValues, cbSheetSep, cbSheetEnd;
         NumericUpDown numInterval, numCount;
@@ -3750,17 +3803,18 @@ namespace LcrLogger
             try
             {
                 List<string> responses;
+                var monis = new List<string>();
                 if (list.Count == 0)
                 {
                     // EXT 트리거일 때는 한 줄로 보내 측정이 끝난 뒤의 값을 받음
-                    string response = await Io(() => m.Query(trg ? "*TRG;:MEAS?" : ":MEAS?"));
+                    string response = await Io(() => { string r = m.Query(trg ? "*TRG;:MEAS?" : ":MEAS?"); monis.Add(m.Query(":MONI?")); return r; });
                     responses = new List<string> { response };
                 }
                 else
                 {
-                    responses = await Io(() => MeasureFrequencies(m, list));
+                    responses = await Io(() => MeasureFrequencies(m, list, monis));
                 }
-                AddRow(responses);
+                AddRow(responses, monis);
                 return responses;
             }
             catch (Exception ex)
@@ -3781,7 +3835,8 @@ namespace LcrLogger
         }
 
         // 주파수를 하나씩 바꾸고 EXT 트리거로 새로 측정. 끝나면 원래 주파수와 트리거로 되돌림.
-        internal static List<string> MeasureFrequencies(IMeter m, List<double> list)
+        // monis가 있으면 주파수마다 :MONI? (모니터 전압,전류)도 받아 넣음
+        internal static List<string> MeasureFrequencies(IMeter m, List<double> list, List<string> monis = null)
         {
             var responses = new List<string>();
             string originalTrigger = m.Query(":TRIG?");
@@ -3793,6 +3848,7 @@ namespace LcrLogger
                 {
                     m.Send(":FREQ " + hz.ToString("R", CultureInfo.InvariantCulture));
                     responses.Add(m.Query("*TRG;:MEAS?"));
+                    if (monis != null) monis.Add(m.Query(":MONI?"));
                 }
             }
             finally
@@ -3803,7 +3859,7 @@ namespace LcrLogger
             return responses;
         }
 
-        void AddRow(List<string> responses)
+        void AddRow(List<string> responses, List<string> monis)
         {
             foreach (string response in responses)
             {
@@ -3814,7 +3870,14 @@ namespace LcrLogger
 
             lastResponses = responses;
             lastPars = pars;
-            string[] row = Fmt.RowFields(rows.Count + 1, DateTime.Now, txtMemo.Text, condText, pars, responses, unitIndex);
+            string warn = Permeability.RowWarning(Permeability.LevelOf(condText), monis, responses.Count > 1 ? freqLabels : new List<string>());
+            if (warn.Length > 0 && !levelWarned)
+            {
+                Log("※ 레벨 경고 (#" + (rows.Count + 1) + "): " + warn);   // 경고가 새로 생길 때만 로그·경고음 (자동 측정 중 반복 방지)
+                SystemSounds.Exclamation.Play();
+            }
+            levelWarned = warn.Length > 0;
+            string[] row = Fmt.RowFields(rows.Count + 1, DateTime.Now, txtMemo.Text, condText, pars, responses, unitIndex, string.Join(" | ", monis), warn);
             rows.Add(row);
             WriteCsv(row);   // 데이터부터 저장: 아래 화면 표시에서 오류가 나도 기록은 남음
             grid.Rows.Add(row);
@@ -3844,8 +3907,9 @@ namespace LcrLogger
                         parts.Add(freqLabels[f] + ": " + Fmt.Pretty(pars[shown], tokens[shown]).Split('=')[1].Trim());
                 }
             }
-            lblLast.Text = "#" + rows.Count + "   " + (parts.Count > 0 ? string.Join("    ", parts) : string.Join(" | ", responses));
-            lblLast.ForeColor = Theme.Text;
+            lblLast.Text = "#" + rows.Count + "   " + (parts.Count > 0 ? string.Join("    ", parts) : string.Join(" | ", responses))
+                + (warn.Length > 0 ? "    ※ 레벨 경고 (표의 레벨 경고 열 참고)" : "");
+            lblLast.ForeColor = warn.Length > 0 ? Theme.Red : Theme.Text;
         }
 
         // 측정 실패를 로그에만 남기면 눈에 띄지 않으므로 최근 측정값 칸에 빨간 글씨로 표시하고 경고음
@@ -4430,6 +4494,7 @@ namespace LcrLogger
                     MuRow row = await Io(() => Permeability.MeasurePoint(m, hz, s.Rw, s.N, le, ae));
                     if (IsDisposed) return;
                     if (i == 0) Log("첫 점 응답 (:MEAS? | :MONI?): " + row.Raw);
+                    row.Warn = Permeability.LevelWarning(s.Cond.Level, s.Cond.LevelValue, row.V, row.I);
                     muRows.Add(row);
                     Permeability.AddPoint(muChart, row);
                     muProgress.Value = i + 1;
@@ -4752,6 +4817,8 @@ namespace LcrLogger
                 swPars = await Io(() => Enumerable.Range(1, 4).Select(i => m.Query(":PARameter" + i + "?").Trim().ToUpperInvariant()).Where(p => p.Length > 0 && p != "OFF").ToList());
                 if (swPars.Count == 0) throw new InvalidOperationException("계측기의 PAR1~PAR4가 모두 OFF입니다. [계측기 설정] 탭에서 측정할 파라미터를 고르세요.");
                 meterCond = await Io(() => MeasCond.Summary(m));
+                MeasCond freqLevel = Permeability.LevelOf(meterCond);   // 주파수 스윕은 계측기에 설정된 레벨과 비교
+                var swWarned = new List<string>();
                 Sweep.ClearChart(swChart, (name.Length > 0 ? name + "  ·  " : "") + Sweep.Items[item] + " 스윕", item, swPars, logX, pts.Min(), pts.Max());
                 Log("측정 파라미터: " + string.Join(", ", swPars.Select(Fmt.DisplayName)));
                 SetTimeout(m, 60000);   // 저주파·SLOW2·평균이 많으면 한 점에 수 초 이상 걸림
@@ -4767,6 +4834,14 @@ namespace LcrLogger
                         row.Rep = rep;
                         row.No = i + 1;
                         if (swRows.Count == 0) Log("첫 점 응답 (:MEAS? | :MONI?): " + row.Raw);
+                        MeasCond lc = item == 0 ? freqLevel : Sweep.Cond(item, v);
+                        row.Warn = Permeability.LevelWarning(lc.Level, lc.LevelValue, row.V, row.I);
+                        if (row.Warn.Length > 0 && !swWarned.Contains(Permeability.WarningKind(row.Warn)))
+                        {
+                            swWarned.Add(Permeability.WarningKind(row.Warn));   // 같은 종류는 처음 한 번만 로그·경고음
+                            Log("※ " + Sweep.Items[item] + " " + v.ToString("0.######", CultureInfo.InvariantCulture) + ": " + row.Warn);
+                            SystemSounds.Exclamation.Play();
+                        }
                         swRows.Add(row);
                         Sweep.AddPoint(swChart, row, swPars);
                         swProgress.Value = swRows.Count;
@@ -4797,7 +4872,8 @@ namespace LcrLogger
                     kv("파라미터", string.Join(", ", swPars.Select(Fmt.DisplayName))),
                     kv("계측기", currentIdn ?? ""),
                     kv("계측기 조건", meterCond),
-                    kv("상태", status)
+                    kv("상태", status),
+                    kv("경고", swRows.Count(r => r.Warn.Length > 0) == 0 ? "없음" : "측정 신호가 설정과 다른 점 " + swRows.Count(r => r.Warn.Length > 0) + "개 (레벨 경고 열 참고)")
                 };
                 try
                 {
@@ -5330,10 +5406,14 @@ namespace LcrLogger
                 Check(string.Join(",", picked) == "100,90", "Lp가 같이 있어도 Ls만 입력");
                 output.AppendLine("셀 입력값(인덕턴스만): " + string.Join(" [Tab] ", lOnly));
                 output.AppendLine("셀 입력값(전체): " + string.Join(" [Tab] ", all));
-                multiWriter.Append(Fmt.RowFields(1, DateTime.Now, "", MeasCond.Summary(m), pars, responses, 2));
+                multiWriter.Append(Fmt.RowFields(1, DateTime.Now, "", MeasCond.Summary(m), pars, responses, 2, "1.0E+00,1.0E-03", "레벨 시험"));
                 string[] multiLines = File.ReadAllLines(multiWriter.FilePath, Encoding.UTF8);
                 Check(multiLines[0].Contains("메모,측정조건,Ls@1kHz [µH],Q@1kHz,Ls@100kHz [µH]"), "다중 주파수 열 제목 (측정조건 열 포함)");
                 Check(multiLines[1].Contains(",V 1.000V / SPEED MEDIUM / DC바이어스 OFF,"), "CSV 측정조건 값");
+                Check(multiLines[0].Contains(",\"모니터 V,I\",레벨 경고,원본응답") && multiLines[1].Contains(",\"1.0E+00,1.0E-03\",레벨 시험,"), "CSV 모니터·레벨 경고 열");
+                var moniList = new List<string>();
+                MainForm.MeasureFrequencies(m, hzList, moniList);
+                Check(moniList.Count == 4 && moniList.All(x => Fmt.Tokens(x).Length == 2), "다중 주파수 :MONI? 응답");
                 Check(multiLines[1].Split(',').Length >= 3 + 8, "다중 주파수 값 열 개수");
                 output.AppendLine("다중 주파수 CSV:");
                 output.AppendLine(multiLines[0]);
@@ -5457,11 +5537,23 @@ namespace LcrLogger
             Check(cw.Count == 1 && cw[0].Contains("설정 100 µA") && cw[0].Contains("실제 최소 79 µA") && cw[0].Contains("1.6MHz부터") && cw[0].Contains("출력 전압 한계"), "CC 출력 전압 한계 " + string.Join(" / ", cw));
             Check(Permeability.WarningKind(cw[0]) == "설정 전류를 유지하지 못함", "경고 종류 구분");
 
+            // 한 점 레벨 비교: CC는 Imoni, CV는 Vmoni ±10%, V(개방전압)는 비교 안 함
+            Check(Permeability.LevelWarning("CC", 1e-3, 0.5, 0.98e-3) == "" && Permeability.LevelWarning("CC", 1e-3, 5, 0.6e-3).StartsWith("설정 전류를 유지하지 못함 (설정 1 mA, Vmoni 5 V, Imoni 600 µA)")
+                && Permeability.LevelWarning("CC", 10e-6, 0.003, 86e-6).StartsWith("설정보다 전류가 많이 흐름"), "한 점 CC 비교");
+            Check(Permeability.LevelWarning("CV", 1, 0.95, 0.01) == "" && Permeability.LevelWarning("CV", 1, 0.7, 0.05).StartsWith("설정 전압과 다름 (설정 1 V, Vmoni 0.7 V")
+                && Permeability.LevelWarning("V", 1, 0.2, 0.01) == "", "한 점 CV 비교, V는 비교 안 함");
+            MeasCond lo = Permeability.LevelOf("CC 20mA / SPEED MEDIUM / DC바이어스 OFF"), lv = Permeability.LevelOf("CV 1.000V / SPEED FAST / DC바이어스 OFF");
+            Check(lo.Level == "CC" && Near(lo.LevelValue, 0.02, 1e-9) && lv.Level == "CV" && lv.LevelValue == 1 && Permeability.LevelOf("확인 불가").Level == null, "측정 조건 요약에서 레벨 읽기");
+            Check(Permeability.RowWarning(lv, new List<string> { "1.0E+00,1.0E-02", "6.0E-01,5.0E-02" }, new List<string> { "1kHz", "1MHz" }).StartsWith("1MHz: 설정 전압과 다름"), "다중 주파수 레벨 경고");
+            var cvRows = new List<MuRow> { new MuRow { F = 1e3, Z = 1, Theta = 80, Mu1 = 1, V = 1, I = 1e-3 }, new MuRow { F = 1e6, Z = 1, Theta = 80, Mu1 = 1, V = 0.6, I = 5e-3 } };
+            List<string> cvw = Permeability.Warnings(cvRows, new MeasCond { Level = "CV", LevelValue = 1 });
+            Check(cvw.Count == 1 && cvw[0].StartsWith("설정 전압을 유지하지 못함 (설정 1 V, Vmoni 0.6 V~0.6 V, 1MHz~1MHz)"), "CV 설정 전압 비교 " + string.Join(" / ", cvw));
+
             // CSV: 머리 정보 + 빈 줄 + 열 제목 + 데이터
             var info = new List<KeyValuePair<string, string>> { new KeyValuePair<string, string>("시료명", "코어, A") };
             List<string> lines = Permeability.CsvLines(info, rowsCc);
-            Check(lines[0] == "시료명,\"코어, A\"" && lines[1] == "" && lines[2] == "f [Hz],Z [Ω],θ [°],Rs [Ω],Ls [H],μ′,μ″,tanδ,Vmoni [V],Imoni [A]"
-                && lines.Count == 3 + rowsCc.Count && lines[3].Split(',').Length == 10, "복소 투자율 CSV 형식");
+            Check(lines[0] == "시료명,\"코어, A\"" && lines[1] == "" && lines[2] == "f [Hz],Z [Ω],θ [°],Rs [Ω],Ls [H],μ′,μ″,tanδ,Vmoni [V],Imoni [A],레벨 경고"
+                && lines.Count == 3 + rowsCc.Count && lines[3].Split(',').Length == 11, "복소 투자율 CSV 형식");
             Check(Permeability.CsvLines(info, new List<MuRow> { new MuRow { F = 1000 } })[3].EndsWith(",,"), "읽지 못한 값은 빈칸");
             Check(Permeability.FileStem(" 코어 A/1 ", 10, new DateTime(2026, 11, 13, 9, 5, 0)) == "MU_코어 A_1_N10턴_2026-11-13_09-05-00"
                 && Permeability.FileStem("", 3, new DateTime(2026, 1, 2, 3, 4, 5)) == "MU_시료_N3턴_2026-01-02_03-04-05", "파일 이름 규칙");
@@ -5520,7 +5612,7 @@ namespace LcrLogger
 
             for (int i = 0; i < cc.Count; i++) { cc[i].Rep = 1; cc[i].No = i + 1; }
             List<string> lines = Sweep.CsvLines(new List<KeyValuePair<string, string>> { new KeyValuePair<string, string>("시료명", "A") }, 3, pars, cc);
-            Check(lines[2] == "반복,No,정전류 CC [mA],Ls [H],Q,Vmoni [V],Imoni [A],측정시각" && lines[3].StartsWith("1,1,1,") && lines.Count == 6, "스윕 CSV " + lines[2]);
+            Check(lines[2] == "반복,No,정전류 CC [mA],Ls [H],Q,Vmoni [V],Imoni [A],측정시각,레벨 경고" && lines[3].StartsWith("1,1,1,") && lines.Count == 6, "스윕 CSV " + lines[2]);
             Check(Sweep.FileStem("a/b", new DateTime(2026, 11, 13, 1, 2, 3)) == "SWEEP_a_b_2026-11-13_01-02-03", "스윕 파일 이름");
             using (Charting.Chart chart = Sweep.NewChart())
             {
