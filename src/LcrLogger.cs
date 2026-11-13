@@ -28,8 +28,8 @@ using Charting = System.Windows.Forms.DataVisualization.Charting;
 [assembly: System.Reflection.AssemblyProduct("LCR Logger")]
 [assembly: System.Reflection.AssemblyCompany("KIM YEONGDO")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 KIM YEONGDO")]
-[assembly: System.Reflection.AssemblyVersion("1.15.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.15.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.16.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.16.0.0")]
 
 namespace LcrLogger
 {
@@ -998,17 +998,60 @@ namespace LcrLogger
             finally { MeasCond.Restore(m, saved); }
         }
 
-        public static List<string> Warnings(List<MuRow> rows)
+        // 경고 문구는 "종류 (자세한 내용)" 형식. 측정 중에는 괄호 앞 종류가 처음 나올 때만 로그에 남김
+        public static string WarningKind(string w) { int i = w.IndexOf(" ("); return i > 0 ? w.Substring(0, i) : w; }
+
+        // 두 자리 유효숫자로 반올림한 주파수 표시 (예: 1147730 → 1.1MHz)
+        static string RoughFreq(double hz)
+        {
+            double p = Math.Pow(10, Math.Floor(Math.Log10(hz)) - 1);
+            return Fmt.FrequencyLabel(Math.Round(hz / p) * p);
+        }
+
+        public static string Amps(double a)
+        {
+            return a < 1e-3 ? (a * 1e6).ToString("G3", CultureInfo.InvariantCulture) + " µA" : (a * 1e3).ToString("G3", CultureInfo.InvariantCulture) + " mA";
+        }
+
+        // cond: 측정에 쓴 조건 (CC이면 Imoni를 설정 전류와 비교, V/CV이면 첫 점과 비교)
+        public static List<string> Warnings(List<MuRow> rows, MeasCond cond)
         {
             var w = new List<string>();
             var valid = rows.Where(r => !double.IsNaN(r.Z) && !double.IsNaN(r.Theta)).ToList();
             if (valid.Count == 0) return w;
             int sign = Math.Sign(valid[0].Theta);
             MuRow res = valid.FirstOrDefault(r => r.Mu1 < 0 || Math.Sign(r.Theta) != sign);
-            if (res != null) w.Add("권선 자기공진 의심 (" + Fmt.FrequencyLabel(res.F) + "부터 μ′ 음수 또는 θ 부호 바뀜), 턴 수를 줄여 재측정 권장");
+            // shortcut: 신뢰 구간을 공진 주파수의 절반으로 어림 (실측 NX4 10턴: 공진 2.3 MHz, μ′ 왜곡은 1 MHz 부근부터). 더 정확히 하려면 μ′ 기울기로 판정
+            if (res != null)
+                w.Add("권선 자기공진 의심 (" + Fmt.FrequencyLabel(res.F) + "에서 μ′ 음수 또는 θ 부호 바뀜) - 신뢰 구간은 대략 "
+                    + RoughFreq(res.F / 2) + " 이하, 더 높은 주파수는 턴 수를 줄여 재측정 권장");
+
             var cur = rows.Where(r => !double.IsNaN(r.I) && r.I > 0).ToList();
-            if (cur.Count > 1 && cur.Any(r => Math.Abs(r.I / cur[0].I - 1) > 0.1))
-                w.Add("측정 레벨이 일정하지 않음 (Imoni가 시작값보다 ±10% 넘게 변함), CC 모드 권장");
+            if (cur.Count == 0) return w;
+            if (cond != null && cond.Level == "CC" && cond.LevelValue > 0)
+            {
+                double set = cond.LevelValue;
+                var high = cur.Where(r => r.I > set * 1.1).ToList();
+                var low = cur.Where(r => r.I < set * 0.9).ToList();
+                if (high.Count > 0)
+                    w.Add("설정보다 전류가 많이 흐름 (설정 " + Amps(set) + ", 실제 최대 " + Amps(high.Max(r => r.I)) + ", "
+                        + Fmt.FrequencyLabel(high.First().F) + "~" + Fmt.FrequencyLabel(high.Last().F)
+                        + ") - 설정 전류가 계측기가 낼 수 있는 최소 신호보다 작습니다. 레벨을 올리세요");
+                if (low.Count > 0)
+                {
+                    double vmax = cur.Where(r => !double.IsNaN(r.V)).Select(r => r.V).DefaultIfEmpty(0).Max();
+                    var lowV = low.Where(r => !double.IsNaN(r.V)).ToList();
+                    // 전류가 모자란 점들의 Vmoni가 측정 중 최대 전압 근처에 모여 있으면 출력 전압 한계
+                    bool clipped = vmax > 0 && lowV.Count > 0 && lowV.Average(r => r.V) >= vmax * 0.9;
+                    w.Add("설정 전류를 유지하지 못함 (설정 " + Amps(set) + ", 실제 최소 " + Amps(low.Min(r => r.I)) + ", "
+                        + Fmt.FrequencyLabel(low.First().F) + "부터)"
+                        + (clipped ? " - Vmoni가 약 " + vmax.ToString("0.0#", CultureInfo.InvariantCulture) + " V에서 막혀 있어 출력 전압 한계입니다. 턴 수를 줄이거나 레벨을 낮추세요"
+                                   : " - 측정 레벨이 설정과 다릅니다"));
+                }
+            }
+            else if (cur.Count > 1 && cur.Any(r => Math.Abs(r.I / cur[0].I - 1) > 0.1))
+                w.Add("측정 레벨이 일정하지 않음 (Imoni가 시작값 " + Amps(cur[0].I) + "보다 ±10% 넘게 변함, 범위 "
+                    + Amps(cur.Min(r => r.I)) + "~" + Amps(cur.Max(r => r.I)) + "), CC 모드 권장");
             return w;
         }
 
@@ -3371,7 +3414,7 @@ namespace LcrLogger
         {
             Func<string, string, KeyValuePair<string, string>> kv = (k, v) => new KeyValuePair<string, string>(k, v);
             Func<double, string> g = v => v.ToString("G6", CultureInfo.InvariantCulture);
-            List<string> warns = Permeability.Warnings(muRows);
+            List<string> warns = Permeability.Warnings(muRows, s.Cond);
             return new List<KeyValuePair<string, string>>
             {
                 kv("측정 일시", started.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
@@ -3453,14 +3496,15 @@ namespace LcrLogger
                     muRows.Add(row);
                     Permeability.AddPoint(muChart, row);
                     muProgress.Value = i + 1;
-                    foreach (string w in Permeability.Warnings(muRows))
+                    List<string> warns = Permeability.Warnings(muRows, s.Cond);
+                    foreach (string w in warns)
                     {
-                        if (shown.Contains(w)) continue;
-                        shown.Add(w);
+                        if (shown.Contains(Permeability.WarningKind(w))) continue;   // 같은 종류는 처음 한 번만 로그·경고음 (내용은 점마다 갱신됨)
+                        shown.Add(Permeability.WarningKind(w));
                         Log("※ " + w);
                         SystemSounds.Exclamation.Play();
                     }
-                    lblMuWarn.Text = string.Join("\n", shown.Select(w => "※ " + w));
+                    lblMuWarn.Text = string.Join("\n", warns.Select(w => "※ " + w));
                     if (s.DelayMs > 0) await Task.Delay(s.DelayMs);
                 }
                 if (muStopRequested) status = "중지됨 (" + muRows.Count + "/" + list.Count + "점)";
@@ -3472,6 +3516,7 @@ namespace LcrLogger
             }
             if (IsDisposed) return;
             SetTimeout(m, 5000);
+            foreach (string w in Permeability.Warnings(muRows, s.Cond)) Log("※ 최종 경고: " + w);
 
             // 받은 데이터부터 저장 (계측기 복원이 실패해도 데이터는 남도록)
             if (muRows.Count > 0)
@@ -3836,18 +3881,33 @@ namespace LcrLogger
             MuRow peak = rowsCc.OrderByDescending(r => r.Mu2).First();
             Check(peak.F > 150e3 && peak.F < 270e3 && Near(peak.Mu2, 5000, 0.02), "μ″ 최대 " + peak.Mu2 + " @ " + peak.F + " Hz");
             Check(Near(rowsCc[0].I, 0.001, 1e-6) && rowsCc.All(r => !double.IsNaN(r.V)), "Vmoni·Imoni 읽기");
-            Check(Permeability.Warnings(rowsCc).Count == 0, "CC 측정은 경고 없음");
+            Check(Permeability.Warnings(rowsCc, cond).Count == 0, "CC 측정은 경고 없음");
 
             // V 모드(출력 저항 100 Ω): 임피던스가 커지면 전류가 줄어 레벨 경고
-            var vSaved = Permeability.ApplyTemp(m, new MeasCond { Level = "V", LevelValue = 0.1, Pars = new[] { "Z", "PHASE", "OFF", "OFF" } }, new List<string>());
+            var vCond = new MeasCond { Level = "V", LevelValue = 0.1, Pars = new[] { "Z", "PHASE", "OFF", "OFF" } };
+            var vSaved = Permeability.ApplyTemp(m, vCond, new List<string>());
             var rowsV = Permeability.Frequencies(1e3, 8e6, 5, true).Select(hz => Permeability.MeasurePoint(m, hz, 0, 10, le / 1000, ae / 1e6)).ToList();
             MeasCond.Restore(m, vSaved);
-            Check(Permeability.Warnings(rowsV).Any(w => w.Contains("CC 모드")), "V 모드 레벨 변화 경고");
+            Check(Permeability.Warnings(rowsV, vCond).Any(w => w.Contains("CC 모드")), "V 모드 레벨 변화 경고");
             // 자기공진: θ 부호가 바뀌거나 μ′가 음수
             var res = rowsCc.Take(3).Select(r => Permeability.Calc(r.F, r.Z, r.Theta, 0.05, 10, le / 1000, ae / 1e6)).ToList();
             res.Add(Permeability.Calc(5e6, 100, -30, 0.05, 10, le / 1000, ae / 1e6));
-            List<string> rw = Permeability.Warnings(res);
-            Check(rw.Count == 1 && rw[0].Contains("자기공진") && rw[0].Contains("5MHz"), "자기공진 경고");
+            List<string> rw = Permeability.Warnings(res, cond);
+            Check(rw.Count == 1 && rw[0].Contains("자기공진") && rw[0].Contains("5MHz에서") && rw[0].Contains("대략 2.5MHz 이하"), "자기공진 경고와 신뢰 구간 " + rw[0]);
+
+            // CC 설정값과 비교: 실측 NX4처럼 처음엔 설정보다 많이 흐르고(최소 신호 한계), 고주파에선 모자람(출력 전압 한계 ~1 V)
+            var cc10 = new MeasCond { Level = "CC", LevelValue = 10e-6 };
+            var lowSet = new List<MuRow>();
+            foreach (double f in new[] { 1e3, 5e3, 3e4, 1e5 }) lowSet.Add(new MuRow { F = f, Z = 1, Theta = 80, Mu1 = 1, I = f < 2e4 ? 86e-6 : 10e-6, V = 0.003 });
+            List<string> lw = Permeability.Warnings(lowSet, cc10);
+            Check(lw.Count == 1 && lw[0].Contains("설정 10 µA") && lw[0].Contains("실제 최대 86 µA") && lw[0].Contains("1kHz~5kHz") && lw[0].Contains("레벨을 올리세요"), "CC 설정보다 많이 흐름 " + string.Join(" / ", lw));
+            var cc100 = new MeasCond { Level = "CC", LevelValue = 100e-6 };
+            var clip = new List<MuRow>();
+            foreach (double f in new[] { 1e3, 1e5, 1e6, 1.6e6, 2e6 }) clip.Add(new MuRow { F = f, Z = 1, Theta = 80, Mu1 = 1, I = f < 1.5e6 ? 97e-6 : 79e-6, V = f < 1.5e6 ? 0.004 * f / 1e3 : 1.0 });
+            clip[2].V = 0.99;   // 1 MHz: 아직 전류는 유지
+            List<string> cw = Permeability.Warnings(clip, cc100);
+            Check(cw.Count == 1 && cw[0].Contains("설정 100 µA") && cw[0].Contains("실제 최소 79 µA") && cw[0].Contains("1.6MHz부터") && cw[0].Contains("출력 전압 한계"), "CC 출력 전압 한계 " + string.Join(" / ", cw));
+            Check(Permeability.WarningKind(cw[0]) == "설정 전류를 유지하지 못함", "경고 종류 구분");
 
             // CSV: 머리 정보 + 빈 줄 + 열 제목 + 데이터
             var info = new List<KeyValuePair<string, string>> { new KeyValuePair<string, string>("시료명", "코어, A") };
