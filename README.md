@@ -132,6 +132,20 @@ CSV 파일은 엑셀에서 바로 열 수 있고, 구글 스프레드시트에�
   - 가상 코어 스윕에서 저주파 μ′≈10000, μ″ 최대≈5000 @≈200 kHz인지
   - 두 경고, 조건 복원, CSV 형식, PNG 저장
 
+## 공식 프로그램 기능 탭 (1.17)
+
+공식 프로그램(LCR Meter Sample Application 1.4.0)을 디컴파일해 IM3536에 해당하는 기능을 탭으로 옮겼습니다.
+
+| 탭 | 공식 프로그램 기능 | 사용 명령 |
+|---|---|---|
+| 스윕 측정 | Sweep Measurement (주파수 / V / CV / CC, 반복, 점 목록 Auto Setup) | `:FREQ`, `:LEV:VOLT`·`:LEV:CVOLT`·`:LEV:CCURR`, `*ESR?`, `*TRG;:MEAS?`, `:MONI?` |
+| 계측기 설정 | Set LCR (26개 항목 읽기·쓰기) | `:FREQ`, `:LEVel`, `:LIM`, `:RANG:AUTO`, `:RANG`, `:RANG:LOWZ`, `:SPEEd`, `:AVER`, `:TRIG`, `:TRIG:DEL`, `:SSO`, `:SSO:WAIT`, `:DCBias`, `:PAR1~4`, `:DCR:DCD`, `:DCR:ADJD`, `:DCR:LFR` |
+| 계측기 설정 | Hard Copy (화면 캡처) | `:HCOPy:DATA? color` / `monochrome` (바이너리 블록 `#n길이데이터`) |
+| 계산 도구 | Calc Accuracy, Calc Measure Range (IM3536 표·계수) | 없음 (계산만) |
+
+옮기지 않은 것: Analyzer·Transformer 모드(IM3570·IM3533 전용), 설정 저장/불러오기(공식 앱에서도 IM3523 전용),
+Communication Time Test, Interval·Enter 키 측정(이미 [인덕턴스 기록] 탭에 있음).
+
 ## CSV 형식
 
 ```

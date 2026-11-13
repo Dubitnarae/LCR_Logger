@@ -28,8 +28,8 @@ using Charting = System.Windows.Forms.DataVisualization.Charting;
 [assembly: System.Reflection.AssemblyProduct("LCR Logger")]
 [assembly: System.Reflection.AssemblyCompany("KIM YEONGDO")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 KIM YEONGDO")]
-[assembly: System.Reflection.AssemblyVersion("1.16.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.16.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.17.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.17.0.0")]
 
 namespace LcrLogger
 {
@@ -263,6 +263,7 @@ namespace LcrLogger
     {
         void Send(string command);
         string Query(string command);
+        byte[] QueryBlock(string command);   // 바이너리 블록 응답 (#<자릿수><길이><데이터>), 예: 화면 캡처
     }
 
     class SerialMeter : IMeter
@@ -311,6 +312,32 @@ namespace LcrLogger
             }
         }
 
+        // 공식 앱 Form_HardCopy와 같은 읽기: '#', 길이 자릿수 n, n자리 길이, 데이터, 끝 문자(CR 또는 CR+LF)
+        public byte[] QueryBlock(string command)
+        {
+            port.DiscardInBuffer();
+            Send(command);
+            try
+            {
+                if (port.ReadByte() != '#') throw new InvalidDataException("'" + command + "' 응답이 바이너리 블록(#)이 아닙니다.");
+                int digits = port.ReadByte() - '0';
+                var len = new StringBuilder();
+                for (int i = 0; i < digits; i++) len.Append((char)port.ReadByte());
+                int size;
+                if (digits < 1 || digits > 9 || !int.TryParse(len.ToString(), out size) || size <= 0)
+                    throw new InvalidDataException("'" + command + "' 블록 길이를 읽을 수 없습니다 (" + len + ").");
+                var data = new byte[size];
+                for (int got = 0; got < size; ) got += port.Read(data, got, size - got);
+                Thread.Sleep(100);
+                port.DiscardInBuffer();   // 끝 문자
+                return data;
+            }
+            catch (TimeoutException)
+            {
+                throw new TimeoutException("'" + command + "' 응답 없음 (" + port.ReadTimeout / 1000 + "초).");
+            }
+        }
+
         public void Dispose()
         {
             // 장치가 이미 분리된 경우 닫기에서 예외가 나도 무시
@@ -339,7 +366,7 @@ namespace LcrLogger
         static string ParKey(int i) { return ":PARameter" + (i + 1); }
 
         // 신호 종류별 레벨 값 명령
-        static string LevelKey(string mode)
+        public static string LevelKey(string mode)
         {
             return mode == "V" ? ":LEVel:VOLTage" : mode == "CV" ? ":LEVel:CVOLTage" : ":LEVel:CCURRent";
         }
@@ -558,6 +585,32 @@ namespace LcrLogger
             if (Regex.IsMatch(c, @"^:AVER(AGING)? ")) aver = c.Substring(c.IndexOf(' ') + 1).Trim() == "1" ? "OFF" : c.Substring(c.IndexOf(' ') + 1).Trim();
             if (c.StartsWith(":DCBIAS:LEVEL ")) dclevel = c.Substring(14);
             else if (c.StartsWith(":DCBIAS ")) dcbias = c.Substring(8);
+            int sp = c.IndexOf(' ');
+            if (sp > 0 && extra.ContainsKey(c.Substring(0, sp))) extra[c.Substring(0, sp)] = c.Substring(sp + 1).Trim();
+        }
+
+        // [계측기 설정] 탭 항목 중 위에서 따로 흉내 내지 않는 것 (보낸 값을 그대로 돌려줌)
+        readonly Dictionary<string, string> extra = new Dictionary<string, string>
+        {
+            { ":LIM", "OFF" }, { ":LIM:VOLT", "5.000" }, { ":LIM:CURR", "50.00E-03" }, { ":RANG:AUTO", "ON" }, { ":RANG", "4" },
+            { ":RANG:LOWZ", "OFF" }, { ":TRIG:DEL", "0.0000" }, { ":SSO", "OFF" }, { ":SSO:WAIT", "0.0010" },
+            { ":DCR:DCD", "0.0000" }, { ":DCR:ADJD", "0.0030" }, { ":DCR:LFR", "60" }
+        };
+
+        // 화면 캡처 흉내: 480×272 BMP
+        public byte[] QueryBlock(string command)
+        {
+            CheckPlugged();
+            using (var bmp = new Bitmap(480, 272))
+            using (var g = Graphics.FromImage(bmp))
+            using (var ms = new MemoryStream())
+            {
+                bool mono = command.ToUpperInvariant().Contains("MONO");
+                g.Clear(mono ? Color.White : Color.FromArgb(20, 40, 90));
+                g.DrawString("IM3536 DEMO " + Fmt.FrequencyLabel(freq), new Font("Arial", 20), mono ? Brushes.Black : Brushes.White, 20, 110);
+                bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Bmp);
+                return ms.ToArray();
+            }
         }
 
         public string Query(string command)
@@ -607,6 +660,8 @@ namespace LcrLogger
                 }
                 return string.Join(",", values);
             }
+            string ex;
+            if (c.EndsWith("?") && extra.TryGetValue(c.TrimEnd('?'), out ex)) return ex;
             return "";
         }
 
@@ -913,13 +968,14 @@ namespace LcrLogger
             return r;
         }
 
-        public static List<double> Frequencies(double start, double stop, int points, bool log)
+        // decimals: 주파수는 계측기에 소수 둘째 자리까지 보냄 (공식 앱과 같음). 레벨 스윕은 더 잘게
+        public static List<double> Frequencies(double start, double stop, int points, bool log, int decimals = 2)
         {
             var list = new List<double>();
             for (int i = 0; i < points; i++)
             {
                 double t = points == 1 ? 0 : (double)i / (points - 1);
-                list.Add(Math.Round(log ? start * Math.Pow(stop / start, t) : start + (stop - start) * t, 2));   // 계측기에 소수 둘째 자리까지 보냄 (공식 앱과 같음)
+                list.Add(Math.Round(log ? start * Math.Pow(stop / start, t) : start + (stop - start) * t, decimals));
             }
             return list;
         }
@@ -1144,6 +1200,444 @@ namespace LcrLogger
             chart.Series[0].Points.AddXY(r.F, r.Mu1);
             chart.Series[1].Points.AddXY(r.F, r.Mu2);
             chart.ChartAreas[0].AxisX.IsLogarithmic = true;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 스윕 측정 (공식 앱 Sweep Measurement: 주파수 / V / CV / CC를 바꿔 가며 PAR1~4 측정)
+    // ------------------------------------------------------------------
+
+    class SweepRow
+    {
+        public int Rep, No;
+        public double X, V = double.NaN, I = double.NaN;
+        public double[] Vals;
+        public DateTime Time;
+        public string Raw;
+    }
+
+    static class Sweep
+    {
+        public static readonly string[] Items = { "주파수 [Hz]", "개방전압 V [V]", "정전압 CV [V]", "정전류 CC [mA]" };
+        static readonly string[] Modes = { null, "V", "CV", "CC" };
+
+        public static string RangeText(int item)
+        {
+            return item == 0 ? "4 Hz ~ 8 MHz (예: 1k, 100k, 1M)" : item == 3 ? "0.01 ~ 50 mA" : "0.005 ~ 5 V";
+        }
+
+        // 점 목록 글자 → 값 (주파수 Hz / 전압 V / 전류 mA). 쉼표·줄바꿈·공백으로 구분
+        public static List<double> ParsePoints(int item, string text)
+        {
+            var list = new List<double>();
+            foreach (string t in text.Split(new[] { ',', ';', '\r', '\n', ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                double v;
+                bool ok = item == 0 ? Fmt.TryParseFrequency(t, out v)
+                    : Fmt.TryParse(t, out v) && (item == 3 ? v >= 0.01 && v <= 50 : v >= 0.005 && v <= 5);
+                if (!ok) throw new InvalidOperationException("점 '" + t + "'을(를) 읽을 수 없습니다. " + RangeText(item) + " 범위로 입력하세요.");
+                list.Add(v);
+            }
+            if (list.Count == 0) throw new InvalidOperationException("점 목록이 비어 있습니다. [점 목록 만들기]를 누르거나 직접 입력하세요.");
+            if (list.Count > 5000) throw new InvalidOperationException("점은 5000개까지입니다 (공식 앱과 같은 한도).");
+            return list;
+        }
+
+        // 스윕 동안 바꾸는 측정 신호 종류 (주파수 스윕이면 바꾸지 않음). 값은 첫 점으로 시작
+        public static MeasCond Cond(int item, double first)
+        {
+            return item == 0 ? new MeasCond() : new MeasCond { Level = Modes[item], LevelValue = item == 3 ? first / 1000 : first };
+        }
+
+        // 한 점: 값 설정 → 계측기가 받았는지(*ESR?) → 트리거 → PAR 값 → 모니터 전압·전류 (공식 앱 Form_LCR_Sweep 순서)
+        public static SweepRow MeasurePoint(IMeter m, int item, double v, int nPars)
+        {
+            string cmd = item == 0 ? ":FREQ " + v.ToString("F2", CultureInfo.InvariantCulture)
+                : MeasCond.LevelKey(Modes[item]) + " " + (item == 3 ? v / 1000 : v).ToString("0.000000", CultureInfo.InvariantCulture);
+            m.Send(cmd);
+            string esr = m.Query("*ESR?").Trim();
+            int bits;
+            if (int.TryParse(esr, out bits) && (bits & 56) != 0)
+                throw new InvalidOperationException("계측기가 '" + cmd + "'을(를) 받지 않았습니다 (*ESR? = " + esr + "). 지금 레인지·주파수에서 허용되는 값인지 확인하세요.");
+            string meas = m.Query("*TRG;:MEAS?"), moni = m.Query(":MONI?");
+            string[] t = Fmt.Tokens(meas), vi = Fmt.Tokens(moni);
+            return new SweepRow
+            {
+                X = v,
+                Vals = Enumerable.Range(0, nPars).Select(i => i < t.Length ? Permeability.Value(t[i]) : double.NaN).ToArray(),
+                V = vi.Length > 0 ? Permeability.Value(vi[0]) : double.NaN,
+                I = vi.Length > 1 ? Permeability.Value(vi[1]) : double.NaN,
+                Time = DateTime.Now,
+                Raw = meas + " | " + moni
+            };
+        }
+
+        static string G(double v) { return double.IsNaN(v) ? "" : v.ToString("G7", CultureInfo.InvariantCulture); }
+
+        public static List<string> CsvLines(List<KeyValuePair<string, string>> info, int item, List<string> pars, List<SweepRow> rows)
+        {
+            var lines = info.Select(kv => Fmt.CsvLine(new[] { kv.Key, kv.Value })).ToList();
+            lines.Add("");
+            lines.Add(Fmt.CsvLine(new[] { "반복", "No", Items[item] }.Concat(pars.Select(p => Fmt.Header(p, 0))).Concat(new[] { "Vmoni [V]", "Imoni [A]", "측정시각" })));
+            foreach (SweepRow r in rows)
+                lines.Add(Fmt.CsvLine(new[] { r.Rep.ToString(CultureInfo.InvariantCulture), r.No.ToString(CultureInfo.InvariantCulture), G(r.X) }
+                    .Concat(r.Vals.Select(G)).Concat(new[] { G(r.V), G(r.I), r.Time.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) })));
+            return lines;
+        }
+
+        public static string FileStem(string name, DateTime time)
+        {
+            string s = name.Trim().Length == 0 ? "시료" : name.Trim();
+            s = new string(s.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c).ToArray());
+            return "SWEEP_" + s + "_" + time.ToString("yyyy-MM-dd_HH-mm-ss", CultureInfo.InvariantCulture);
+        }
+
+        // 그래프 모양은 복소 투자율과 같게. 왼쪽 축 PAR1, 오른쪽 축 PAR2, 반복마다 선 하나
+        public static Charting.Chart NewChart()
+        {
+            var chart = Permeability.NewChart();
+            chart.Series.Clear();
+            chart.ChartAreas[0].AxisY.LabelStyle.Format = chart.ChartAreas[0].AxisY2.LabelStyle.Format = "G4";
+            chart.Tag = false;
+            return chart;
+        }
+
+        public static void ClearChart(Charting.Chart chart, string title, int item, List<string> pars, bool logX, double min, double max)
+        {
+            chart.Series.Clear();
+            chart.Titles[0].Text = title;
+            var a = chart.ChartAreas[0];
+            a.AxisX.Title = Items[item];
+            a.AxisX.LabelStyle.Format = item == 0 ? "#,0" : "G4";
+            a.AxisX.IsLogarithmic = false;
+            a.AxisX.Minimum = Math.Min(min, max);
+            a.AxisX.Maximum = Math.Max(min, max) > Math.Min(min, max) ? Math.Max(min, max) : Math.Min(min, max) * 1.01 + 1e-9;
+            a.AxisY.Title = pars.Count > 0 ? Fmt.Header(pars[0], 0) : "";
+            a.AxisY2.Enabled = pars.Count > 1 ? Charting.AxisEnabled.True : Charting.AxisEnabled.False;
+            a.AxisY2.Title = pars.Count > 1 ? Fmt.Header(pars[1], 0) : "";
+            chart.Tag = logX;
+        }
+
+        public static void AddPoint(Charting.Chart chart, SweepRow r, List<string> pars)
+        {
+            for (int k = 0; k < Math.Min(2, pars.Count); k++)
+            {
+                double y = r.Vals[k];
+                if (r.X <= 0 || double.IsNaN(y) || double.IsInfinity(y)) continue;   // 그래프는 NaN을 그리지 못함 (CSV에는 빈칸)
+                string name = Fmt.DisplayName(pars[k]) + " · " + r.Rep + "회" + (k == 1 ? " (오른쪽, 점선)" : "");
+                Charting.Series s = chart.Series.FindByName(name);
+                if (s == null)
+                {
+                    s = new Charting.Series(name) { ChartType = Charting.SeriesChartType.Line, BorderWidth = 2 };
+                    if (k == 1) { s.YAxisType = Charting.AxisType.Secondary; s.BorderDashStyle = Charting.ChartDashStyle.Dash; }
+                    chart.Series.Add(s);
+                }
+                s.Points.AddXY(r.X, y);
+            }
+            if ((bool)chart.Tag) chart.ChartAreas[0].AxisX.IsLogarithmic = true;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 계측기 설정 (공식 앱 Set LCR 화면의 IM3536 항목. 명령 철자는 공식 앱 그대로)
+    // ------------------------------------------------------------------
+
+    class SettingItem
+    {
+        public string Name, Cmd, Hint;
+        public string[] Choices;   // null이면 직접 입력
+        public SettingItem(string name, string cmd, string hint, params string[] choices)
+        {
+            Name = name; Cmd = cmd; Hint = hint; Choices = choices.Length == 0 ? null : choices;
+        }
+    }
+
+    static class MeterSettings
+    {
+        static readonly string[] OnOff = { "ON", "OFF" };
+        static readonly string[] ParList = { "OFF", "Z", "Y", "PHASE", "CS", "CP", "D", "LS", "LP", "Q", "RS", "G", "RP", "X", "B", "RDC", "S", "E" };
+
+        public static readonly SettingItem[] Items =
+        {
+            new SettingItem("측정 주파수 [Hz]", ":FREQ", "4 ~ 8000000"),
+            new SettingItem("측정 신호 종류", ":LEVel", "V 개방전압 / CV 정전압 / CC 정전류", "V", "CV", "CC"),
+            new SettingItem("개방전압 V [V]", ":LEVel:VOLTage", "0.005 ~ 5"),
+            new SettingItem("정전압 CV [V]", ":LEVel:CVOLTage", "0.005 ~ 5"),
+            new SettingItem("정전류 CC [A]", ":LEVel:CCURRent", "0.00001 ~ 0.05 (10 µA ~ 50 mA)"),
+            new SettingItem("리밋 (전압·전류 제한)", ":LIM", "측정 신호의 전압·전류가 리밋 값을 넘지 않게 함", OnOff),
+            new SettingItem("리밋 전압 [V]", ":LIM:VOLT", "0.005 ~ 5"),
+            new SettingItem("리밋 전류 [A]", ":LIM:CURR", "0.00001 ~ 0.05"),
+            new SettingItem("자동 레인지", ":RANG:AUTO", "OFF면 아래 레인지로 고정 (HOLD)", OnOff),
+            new SettingItem("레인지", ":RANG", "1=100mΩ 2=1Ω 3=10Ω 4=100Ω 5=1kΩ 6=10kΩ 7=100kΩ 8=1MΩ 9=10MΩ 10=100MΩ", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"),
+            new SettingItem("LOW Z 모드", ":RANG:LOWZ", "저임피던스 고정밀 모드", OnOff),
+            new SettingItem("SPEED", ":SPEEd", "느릴수록 정확", "FAST", "MEDIUM", "SLOW", "SLOW2"),
+            new SettingItem("평균 횟수", ":AVER", "1 ~ 256 (1 = OFF)"),
+            new SettingItem("트리거", ":TRIG", "INT 내부(연속) / EXT 외부(명령·신호 때만)", "INT", "EXT"),
+            new SettingItem("트리거 지연 [s]", ":TRIG:DEL", "0 ~ 9.999 (트리거 후 측정까지 대기)"),
+            new SettingItem("트리거 동기 출력", ":SSO", "측정하는 동안에만 측정 신호를 냄", OnOff),
+            new SettingItem("동기 출력 대기 [s]", ":SSO:WAIT", "신호를 낸 뒤 측정까지 대기"),
+            new SettingItem("DC 바이어스", ":DCBias", "", OnOff),
+            new SettingItem("DC 바이어스 전압 [V]", ":DCBias:LEVel", "0 ~ 2.5"),
+            new SettingItem("PAR1", ":PARameter1", "같은 파라미터는 두 칸에 못 넣음", ParList),
+            new SettingItem("PAR2", ":PARameter2", "", ParList),
+            new SettingItem("PAR3", ":PARameter3", "", ParList),
+            new SettingItem("PAR4", ":PARameter4", "", ParList),
+            new SettingItem("Rdc 측정 지연 [s]", ":DCR:DCD", "DC 측정 전 대기"),
+            new SettingItem("Rdc 보정 지연 [s]", ":DCR:ADJD", "DC 오프셋 보정 전 대기"),
+            new SettingItem("전원 주파수 [Hz]", ":DCR:LFR", "Rdc 측정의 전원 잡음 제거 (50 / 60)", "50", "60")
+        };
+
+        // 보내고 계측기가 거부했는지 *ESR?(명령·실행·장치 오류 = 56)로 확인. 거부하면 그 값, 받으면 null
+        public static string Apply(IMeter m, SettingItem s, string value)
+        {
+            m.Query("*ESR?");
+            m.Send(s.Cmd + " " + value);
+            string esr = m.Query("*ESR?").Trim();
+            int bits;
+            return int.TryParse(esr, out bits) && (bits & 56) != 0 ? esr : null;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // IM3536 정확도·측정 범위 계산 (공식 앱 Calc Accuracy / Calc Measure Range의 IM3536 부분)
+    // ------------------------------------------------------------------
+
+    class AccResult
+    {
+        public double Z, Ph, AccZ, AccPh, MainMinPct, MainMaxPct, SubMin, SubMax;
+        public string Formula;
+    }
+
+    static class Im3536Calc
+    {
+        public static readonly string[] Paras = { "Z - θ", "Cs - D", "Cp - D", "Ls - Q", "Lp - Q", "Rdc" };
+        public static readonly string[] MainUnits = { "Ω", "F", "F", "H", "H", "Ω" };
+        public static readonly string[] SubNames = { "θ [°]", "D", "D", "Q", "Q", "-" };
+        public static readonly string[] Ranges = { "100mΩ", "1Ω", "10Ω", "100Ω", "1kΩ", "10kΩ", "100kΩ", "1MΩ", "10MΩ", "100MΩ" };
+        public static readonly string[] Cables = { "0 m", "1 m", "2 m", "4 m" };
+        public static readonly string[] Speeds = { "FAST", "MED", "SLOW", "SLOW2" };
+        static readonly double[] RangeVal = { 0.1, 1, 10, 100, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8 };
+
+        // 정확도 A, B [%, °]: [행(0 = 100MΩ … 9 = 100mΩ, 공식 앱 순서), 주파수 구간, {A, B}]. -1은 보증 범위 밖
+        static readonly double[,,] TblZ =
+        { { { 1, 1 }, { 6, 5 }, { 3, 2 }, { 3, 2 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 } },
+            { { 0.5, 0.3 }, { 0.8, 1 }, { 0.5, 0.3 }, { 0.5, 0.3 }, { 2, 1 }, { -1, -1 }, { -1, -1 }, { -1, -1 } },
+            { { 0.2, 0.1 }, { 0.4, 0.08 }, { 0.3, 0.05 }, { 0.3, 0.05 }, { 0.5, 0.1 }, { 3, 0.5 }, { -1, -1 }, { -1, -1 } },
+            { { 0.1, 0.01 }, { 0.3, 0.03 }, { 0.2, 0.03 }, { 0.2, 0.03 }, { 0.25, 0.04 }, { 1, 0.3 }, { 2, 0.5 }, { 2, 0.5 } },
+            { { 0.1, 0.01 }, { 0.3, 0.03 }, { 0.2, 0.02 }, { 0.05, 0.02 }, { 0.3, 0.02 }, { 0.5, 0.05 }, { 2, 0.5 }, { 2, 0.5 } },
+            { { 0.1, 0.01 }, { 0.3, 0.02 }, { 0.2, 0.02 }, { 0.2, 0.02 }, { 0.2, 0.02 }, { 0.4, 0.02 }, { 1.5, 0.2 }, { 1.5, 0.2 } },
+            { { 0.1, 0.02 }, { 0.3, 0.02 }, { 0.2, 0.02 }, { 0.2, 0.02 }, { 0.2, 0.02 }, { 0.5, 0.03 }, { 1.5, 0.2 }, { 1.5, 0.2 } },
+            { { 0.2, 0.15 }, { 0.5, 0.1 }, { 0.4, 0.05 }, { 0.4, 0.05 }, { 0.4, 0.05 }, { 0.8, 0.1 }, { 2, 1.5 }, { 2, 1.5 } },
+            { { 0.3, 0.3 }, { 1.5, 1 }, { 1, 0.3 }, { 1, 0.3 }, { 1, 0.3 }, { 1.5, 1 }, { 3, 3 }, { 3, 3 } },
+            { { 1, 1 }, { 8, 8 }, { 5, 4 }, { 3, 2 }, { 2, 2 }, { 4, 3 }, { -1, -1 }, { -1, -1 } } };
+        static readonly double[,,] TblPh =
+        { { { 0, 0 }, { 5, 3 }, { 2, 2 }, { 2, 2 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 } },
+            { { 0, 0 }, { 0.8, 0.5 }, { 0.4, 0.2 }, { 0.4, 0.2 }, { 2, 1 }, { -1, -1 }, { -1, -1 }, { -1, -1 } },
+            { { 0, 0 }, { 0.3, 0.08 }, { 0.2, 0.02 }, { 0.2, 0.02 }, { 0.6, 0.1 }, { 3, 0.5 }, { -1, -1 }, { -1, -1 } },
+            { { 0, 0 }, { 0.2, 0.02 }, { 0.1, 0.02 }, { 0.1, 0.02 }, { 0.2, 0.02 }, { 1, 0.3 }, { 2, 0.3 }, { 2, 0.3 } },
+            { { 0, 0 }, { 0.2, 0.02 }, { 0.1, 0.02 }, { 0.03, 0.02 }, { 0.2, 0.02 }, { 0.5, 0.05 }, { 1.5, 0.3 }, { 1.5, 0.3 } },
+            { { 0, 0 }, { 0.2, 0.01 }, { 0.1, 0.02 }, { 0.1, 0.02 }, { 0.15, 0.02 }, { 0.4, 0.02 }, { 1.5, 0.2 }, { 1.5, 0.2 } },
+            { { 0, 0 }, { 0.2, 0.01 }, { 0.15, 0.01 }, { 0.1, 0.01 }, { 0.15, 0.02 }, { 0.5, 0.03 }, { 1.5, 0.2 }, { 1.5, 0.2 } },
+            { { 0, 0 }, { 0.3, 0.1 }, { 0.3, 0.03 }, { 0.3, 0.03 }, { 0.3, 0.03 }, { 0.5, 0.05 }, { 2, 1 }, { 2, 1 } },
+            { { 0, 0 }, { 0.8, 0.5 }, { 0.5, 0.2 }, { 0.5, 0.2 }, { 0.5, 0.2 }, { 0.7, 0.5 }, { 3, 2 }, { 3, 2 } },
+            { { 0, 0 }, { 5, 4 }, { 3, 2 }, { 2, 1.5 }, { 2, 1.5 }, { 3, 4 }, { -1, -1 }, { -1, -1 } } };
+
+        // 측정 범위: 레벨 허용 [V] [레인지(0 = 100mΩ), 주파수 구간, {최소, 최대}], 측정 가능 Z [Ω] [레인지, {최소, 최대}]. Wide = 넓은 범위 표
+        static readonly double[,,] TblLev =
+        { { { 1, 1 }, { 0.101, 5 }, { 0.101, 5 }, { 0.101, 5 }, { 0.101, 5 }, { 0.501, 5 }, { -1, -1 }, { -1, -1 } },
+            { { 1, 1 }, { 0.05, 5 }, { 0.05, 5 }, { 0.05, 5 }, { 0.05, 5 }, { 0.101, 5 }, { 0.501, 1 }, { 0.501, 1 } },
+            { { 1, 1 }, { 0.05, 5 }, { 0.05, 5 }, { 0.05, 5 }, { 0.05, 5 }, { 0.05, 5 }, { 0.101, 1 }, { 0.101, 1 } },
+            { { 1, 1 }, { 0.01, 5 }, { 0.01, 5 }, { 0.01, 5 }, { 0.01, 5 }, { 0.01, 5 }, { 0.05, 1 }, { 0.101, 1 } },
+            { { 1, 1 }, { 0.01, 5 }, { 0.01, 5 }, { 0.01, 5 }, { 0.01, 5 }, { 0.01, 5 }, { 0.05, 1 }, { 0.101, 1 } },
+            { { 1, 1 }, { 0.01, 5 }, { 0.01, 5 }, { 0.01, 5 }, { 0.01, 5 }, { 0.05, 5 }, { 0.05, 1 }, { 0.101, 1 } },
+            { { 1, 1 }, { 0.01, 5 }, { 0.01, 5 }, { 0.01, 5 }, { 0.01, 5 }, { 0.05, 5 }, { 0.101, 1 }, { -1, -1 } },
+            { { 1, 1 }, { 0.05, 5 }, { 0.05, 5 }, { 0.05, 5 }, { 0.101, 5 }, { 0.501, 5 }, { -1, -1 }, { -1, -1 } },
+            { { 1, 1 }, { 0.101, 5 }, { 0.101, 5 }, { 0.101, 5 }, { 0.501, 5 }, { -1, -1 }, { -1, -1 }, { -1, -1 } },
+            { { 1, 1 }, { 0.101, 5 }, { 0.101, 5 }, { 0.101, 5 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 } } };
+        static readonly double[,,] TblLevWide =
+        { { { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 } },
+            { { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 } },
+            { { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 } },
+            { { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 } },
+            { { 1, 1 }, { 0.01, 5 }, { 0.01, 5 }, { 0.01, 5 }, { 0.01, 5 }, { 0.05, 5 }, { 0.05, 1 }, { 0.101, 1 } },
+            { { 1, 1 }, { 0.01, 5 }, { 0.01, 5 }, { 0.01, 5 }, { 0.01, 5 }, { 0.05, 5 }, { 0.101, 1 }, { -1, -1 } },
+            { { 1, 1 }, { 0.05, 5 }, { 0.05, 5 }, { 0.05, 5 }, { 0.101, 5 }, { 0.501, 5 }, { -1, -1 }, { -1, -1 } },
+            { { 1, 1 }, { 0.101, 5 }, { 0.101, 5 }, { 0.101, 5 }, { 0.501, 5 }, { -1, -1 }, { -1, -1 }, { -1, -1 } },
+            { { 1, 1 }, { 0.101, 5 }, { 0.101, 5 }, { 0.101, 5 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 } },
+            { { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 } } };
+        static readonly double[,] TblRangeZ = { { 0.001, 0.1 }, { 0.08, 1 }, { 0.8, 10 }, { 8, 100 }, { 80, 1000 }, { 800, 10000 }, { 8000, 100000 }, { 80000, 1000000 }, { 800000, 10000000 }, { 8000000, 200000000 } };
+        static readonly double[,] TblRangeZWide = { { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 }, { 80, 10000 }, { 800, 100000 }, { 8000, 1000000 }, { 80000, 10000000 }, { 800000, 100000000 }, { -1, -1 } };
+
+        // 케이블 길이·레인지별 보증 주파수 상한 [cable, range] (공식 앱 CheckSettingRange). DC 바이어스 ON이면 일부 더 낮음
+        static readonly double[,] MaxF =
+        {
+            { 1e6, 8e6, 8e6, 8e6, 8e6, 8e6, 5e6, 1e6, 1e5, 1e4 },
+            { 1e6, 1e6, 8e6, 8e6, 8e6, 8e6, 5e6, 1e6, 1e5, 1e4 },
+            { 1e6, 1e6, 2e6, 2e6, 2e6, 2e6, 2e6, 1e6, 1e5, 1e4 },
+            { 1e5, 1e6, 1e6, 1e6, 1e6, 1e6, 1e6, 1e5, 1e4, 1e4 }
+        };
+
+        public static double MaxFreq(int cable, int range, bool bias)
+        {
+            if (bias && cable < 3 && range == 0) return 1e5;
+            if (bias && cable == 0 && range == 1) return 1e6;
+            return MaxF[cable, range];
+        }
+
+        public static int FreqIndex(double f)
+        {
+            return f == 0 ? 0 : f < 100 ? 1 : f < 1e3 ? 2 : f <= 1e4 ? 3 : f <= 1e5 ? 4 : f <= 1e6 ? 5 : f <= 5e6 ? 6 : 7;
+        }
+
+        // 지금 |Z|보다 큰 첫 레인지 (공식 앱 자동 레인지 버튼)
+        public static int AutoRange(double z)
+        {
+            int i = 0;
+            while (i < RangeVal.Length && Math.Abs(z) >= RangeVal[i]) i++;
+            return Math.Min(i, RangeVal.Length - 1);
+        }
+
+        // 측정값(주, 부) → |Z|, θ [°]. para: 0 Z-θ, 1 Cs-D, 2 Cp-D, 3 Ls-Q, 4 Lp-Q, 5 Rdc (공식 앱 ConvToZPH)
+        public static void ToZPh(int para, double main, double sub, double f, out double z, out double ph)
+        {
+            double w = 2 * Math.PI * f;
+            switch (para)
+            {
+                case 1: ph = -Math.Abs(Math.Atan(1 / sub)) * 180 / Math.PI; z = Math.Abs(-1 / (w * main * Math.Sin(Math.Atan(1 / sub)))); break;
+                case 2: ph = -Math.Abs(Math.Atan(1 / sub)) * 180 / Math.PI; z = Math.Abs(Math.Sin(-Math.Atan(1 / sub)) / (w * main)); break;
+                case 3: ph = Math.Abs(Math.Atan(sub) * 180 / Math.PI); z = Math.Abs(w * main / Math.Sin(Math.Atan(sub))); break;
+                case 4: ph = Math.Abs(Math.Atan(sub) * 180 / Math.PI); z = Math.Abs(-w * main * Math.Sin(-Math.Atan(sub))); break;
+                case 5: z = Math.Abs(main); ph = 0; break;
+                default: z = Math.Abs(main); ph = sub; break;
+            }
+        }
+
+        // |Z|, θ → 측정값(주, 부) (공식 앱 ConvToPara)
+        public static void FromZPh(int para, double z, double ph, double f, out double main, out double sub)
+        {
+            double w = 2 * Math.PI * f, p = ph * Math.PI / 180, pc = Math.Max(-90, Math.Min(90, ph)) * Math.PI / 180;
+            switch (para)
+            {
+                case 1: main = -1 / (w * Math.Abs(z) * Math.Sin(pc)); sub = Math.Cos(p) / Math.Abs(Math.Sin(p)); break;
+                case 2: main = Math.Sin(-pc) / Math.Abs(z) / w; sub = Math.Cos(p) / Math.Abs(Math.Sin(p)); break;
+                case 3: main = Math.Abs(z) * Math.Sin(pc) / w; sub = Math.Abs(Math.Sin(p)) / Math.Cos(p); break;
+                case 4: main = -1 / (w * (Math.Sin(-pc) / Math.Abs(z))); sub = Math.Abs(Math.Sin(p)) / Math.Cos(p); break;
+                case 5: main = z; sub = 0; break;
+                default: main = z; sub = ph; break;
+            }
+        }
+
+        static double Basic(bool isZ, double z, double f, int range)
+        {
+            int row = 9 - range, fi = FreqIndex(f);
+            double[,,] t = isZ ? TblZ : TblPh;
+            double a = t[row, fi, 0], b = t[row, fi, 1];
+            if (a < 0 || b < 0) throw new InvalidOperationException("이 주파수·레인지 조합은 정확도 보증 범위 밖입니다. 레인지나 주파수를 바꾸세요.");
+            double r = RangeVal[range];
+            double acc = range >= 4 ? a + b * Math.Abs(10 * z / r - 1) : a + b * Math.Abs(r / z - 1);
+            if (f > 1e6 && f <= 5e6) acc *= (f / 1e6 + 3) / 4;
+            else if (f > 5e6) acc *= f / 1e6 / 2;
+            return acc;
+        }
+
+        // 공식 앱 IM3536 계수. 레벨 1 V 초과는 1 + 2/V (공식 앱 그대로)
+        static double LevelCoef(int para, double lev) { return para == 5 ? 1 : lev < 1 ? 1 + 0.2 / lev : lev == 1 ? 1 : 1 + 2 / lev; }
+        static double SpeedCoef(int para, int speed) { return para == 5 ? new[] { 4.0, 3, 2, 1 }[speed] : new[] { 8.0, 4, 2, 1 }[speed]; }
+        static double CableCoef(int cable) { return new[] { 1, 1.5, 2, 3 }[cable]; }
+        static double BiasCoef(int para, bool bias) { return bias && para != 5 ? 2 : 1; }
+        static double TempCoef(int temp) { return temp < 18 || temp > 28 ? 1 + 0.1 * Math.Abs(temp - 23) : 1; }
+
+        public static AccResult Accuracy(int para, double main, double sub, double f, double lev, int range, int speed, int cable, bool bias, int temp)
+        {
+            bool rdc = para == 5;
+            if (rdc) { f = 0; lev = 1; }
+            else
+            {
+                if (f < 4 || f > 8e6) throw new InvalidOperationException("주파수는 4 Hz ~ 8 MHz 범위로 입력하세요.");
+                if (lev < 0.01 || lev > 5) throw new InvalidOperationException("레벨은 0.01 ~ 5 V 범위로 입력하세요.");
+                if (para >= 1 && para <= 4 && sub < 0) throw new InvalidOperationException((para <= 2 ? "D" : "Q") + " 값은 0 이상이어야 합니다.");
+                if (f > MaxFreq(cable, range, bias))
+                    throw new InvalidOperationException("케이블 " + Cables[cable] + "·레인지 " + Ranges[range] + (bias ? "·DC 바이어스 ON" : "") + "에서 정확도를 보증하는 주파수는 "
+                        + Fmt.FrequencyLabel(MaxFreq(cable, range, bias)) + " 이하입니다.");
+            }
+            if (main == 0 || double.IsNaN(main)) throw new InvalidOperationException("측정값(주 파라미터)을 0이 아닌 숫자로 입력하세요.");
+            var r = new AccResult();
+            ToZPh(para, main, sub, f, out r.Z, out r.Ph);
+            double lc = LevelCoef(para, lev), sc = SpeedCoef(para, speed), cc = CableCoef(cable), bc = BiasCoef(para, bias), tc = TempCoef(temp), k = lc * sc * cc * bc * tc;
+            double bz = Basic(true, r.Z, f, range), bp = rdc ? 0 : Basic(false, r.Z, f, range);
+            r.AccZ = Math.Abs(bz * k);
+            r.AccPh = Math.Abs(bp * k);
+            double zmin = r.Z * (1 - r.AccZ / 100), zmax = r.Z * (1 + r.AccZ / 100), pmin = r.Ph - r.AccPh, pmax = r.Ph + r.AccPh;
+            var m4 = new double[4];
+            var s4 = new double[4];
+            FromZPh(para, zmin, pmin, f, out m4[0], out s4[0]);
+            FromZPh(para, zmin, pmax, f, out m4[1], out s4[1]);
+            FromZPh(para, zmax, pmin, f, out m4[2], out s4[2]);
+            FromZPh(para, zmax, pmax, f, out m4[3], out s4[3]);
+            Array.Sort(m4);
+            double am = Math.Abs(main);
+            r.MainMinPct = -Math.Abs(am - m4[0]) / am * 100;
+            r.MainMaxPct = Math.Abs(am - m4[3]) / am * 100;
+            if (para == 1 || para == 2)
+            {
+                // D는 θ가 0°나 ±180°를 넘으면 무한대 (공식 앱 CalcMaxMin_D)
+                r.SubMin = s4[0];
+                r.SubMax = s4[3];
+                if (pmin < 0 && pmax > 0) r.SubMax = double.PositiveInfinity;
+                if ((pmin < 180 && pmax > 180) || (pmin < -180 && pmax > -180)) r.SubMin = double.NegativeInfinity;
+            }
+            else if (para == 3 || para == 4)
+            {
+                // Q (공식 앱 CalcMaxMin_Q): |θ|가 작은 쪽이 최소
+                Func<double, double> q = ph => Math.Abs(Math.Sin(ph * Math.PI / 180)) / Math.Cos(ph * Math.PI / 180);
+                bool maxBig = Math.Abs(pmax) >= Math.Abs(pmin);
+                r.SubMin = q(maxBig ? pmin : pmax);
+                r.SubMax = q(maxBig ? pmax : pmin);
+                if ((pmin < 0) != (pmax < 0)) r.SubMin = 0;
+                if ((pmin < 180 && pmax > 180) || (pmin < -180 && pmax > -180)) r.SubMax = 0;
+                // 공식 앱은 θ가 ±90°를 넘으면 Q 최대를 음수로 보여 줌. 실제로는 Q가 무한대까지 갈 수 있다는 뜻이므로 +∞로 표시
+                if ((pmin < 90 && pmax > 90) || (pmin < -90 && pmax > -90)) r.SubMax = double.PositiveInfinity;
+            }
+            else
+            {
+                Array.Sort(s4);
+                r.SubMin = s4[0];
+                r.SubMax = s4[3];
+            }
+            Func<double, string> g = v => v.ToString("0.#####", CultureInfo.InvariantCulture);
+            string coefs = " × 레벨 " + g(lc) + " × SPEED " + g(sc) + " × 케이블 " + g(cc) + " × DC바이어스 " + g(bc) + " × 온도 " + g(tc);
+            r.Formula = "Z: " + r.AccZ.ToString("F5", CultureInfo.InvariantCulture) + " % = 기본 " + bz.ToString("F5", CultureInfo.InvariantCulture) + coefs
+                + (rdc ? "" : "\nθ: " + r.AccPh.ToString("F5", CultureInfo.InvariantCulture) + " ° = 기본 " + bp.ToString("F5", CultureInfo.InvariantCulture) + coefs);
+            return r;
+        }
+
+        // |Z|가 이 레인지의 측정 범위(보통 또는 넓은 범위 표) 안인지
+        public static bool Covers(int range, double z)
+        {
+            return (z >= TblRangeZ[range, 0] && z <= TblRangeZ[range, 1]) || (TblRangeZWide[range, 0] >= 0 && z >= TblRangeZWide[range, 0] && z <= TblRangeZWide[range, 1]);
+        }
+
+        // 레인지에서 잴 수 있는 |Z| 범위 [Ω]. dc = Rdc 측정(레벨 1 V 고정)
+        public static void MeasRange(int range, bool dc, double f, double lev, out double zmin, out double zmax)
+        {
+            if (dc) { f = 0; lev = 1; }
+            else
+            {
+                if (f < 4 || f > 8e6) throw new InvalidOperationException("주파수는 4 Hz ~ 8 MHz 범위로 입력하세요.");
+                if (lev < 0.01 || lev > 5) throw new InvalidOperationException("레벨은 0.01 ~ 5 V 범위로 입력하세요.");
+            }
+            int fi = FreqIndex(f);
+            double wmin = TblLevWide[range, fi, 0], wmax = TblLevWide[range, fi, 1];
+            bool wide = wmin >= 0 && lev >= wmin && lev <= wmax;
+            if (!wide)
+            {
+                double min = TblLev[range, fi, 0], max = TblLev[range, fi, 1];
+                if (min < 0) throw new InvalidOperationException("레인지 " + Ranges[range] + "에서는 이 주파수로 측정할 수 없습니다.");
+                if (lev < min || lev > max)
+                    throw new InvalidOperationException("레인지 " + Ranges[range] + "·이 주파수에서 레벨은 " + min.ToString("0.###", CultureInfo.InvariantCulture) + " ~ " + max.ToString("0.###", CultureInfo.InvariantCulture) + " V입니다.");
+            }
+            zmin = wide ? TblRangeZWide[range, 0] : TblRangeZ[range, 0];
+            zmax = wide ? TblRangeZWide[range, 1] : TblRangeZ[range, 1];
         }
     }
 
@@ -1463,7 +1957,8 @@ namespace LcrLogger
             this.inner = inner;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
             Margin = new Padding(4, 3, 4, 3);
-            Size = new Size(inner.Width + PadLeft + PadRight, Height0);
+            var box = inner as TextBox;
+            Size = new Size(inner.Width + PadLeft + PadRight, box != null && box.Multiline ? inner.Height + 8 : Height0);
             inner.Margin = Padding.Empty;
             Controls.Add(inner);
             inner.Enter += delegate { focused = true; Invalidate(); };
@@ -1662,6 +2157,34 @@ namespace LcrLogger
         List<KeyValuePair<string, string>> muInfo;  // CSV 위쪽 측정 조건
         string muStem;                              // 마지막 자동 저장 파일 이름 (확장자 없음)
 
+        // 스윕 측정 탭 (측정 전 계측기 값은 복소 투자율과 같은 muSaved에 보관: 두 스윕은 동시에 돌지 않음)
+        TextBox txtSwName, txtSwStart, txtSwStop, txtSwList;
+        ComboBox cbSwItem, cbSwSpacing;
+        NumericUpDown numSwPoints, numSwRepeat, numSwRepeatWait, numSwDelay;
+        Button btnSwMake, btnSwStart, btnSwStop, btnSwCsv, btnSwPng;
+        ProgressBar swProgress;
+        Label lblSwFile, lblSwUnit;
+        Charting.Chart swChart;
+        Dictionary<string, Control> swSettings;
+        bool swRunning, swStopRequested;
+        List<SweepRow> swRows = new List<SweepRow>();
+        List<KeyValuePair<string, string>> swInfo;
+        List<string> swPars = new List<string>();
+        int swItem;
+        string swStem;
+
+        // 계측기 설정 탭
+        DataGridView setGrid;
+        Button btnSetRead, btnSetApply, btnShotColor, btnShotMono;
+        PictureBox shotBox;
+        Label lblShot;
+
+        // 계산 도구 탭
+        ComboBox cbAccPara, cbAccRange, cbAccSpeed, cbAccCable, cbAccBias, cbMrRange, cbMrDc;
+        TextBox txtAccMain, txtAccSub, txtAccFreq, txtAccLevel, txtMrFreq, txtMrLevel;
+        NumericUpDown numAccTemp;
+        Label lblAccMainUnit, lblAccSub, lblAccResult, lblMrResult;
+
         public MainForm(bool justUpdated)
         {
             this.justUpdated = justUpdated;
@@ -1740,6 +2263,12 @@ namespace LcrLogger
             tabMu.Controls.Add(BuildMuTab());
             tabs.TabPages.Add(tabLog);
             tabs.TabPages.Add(tabMu);
+            foreach (var t in new[] { new { Name = "스윕 측정", Body = BuildSweepTab() }, new { Name = "계측기 설정", Body = BuildSetTab() }, new { Name = "계산 도구", Body = BuildToolTab() } })
+            {
+                var page = new TabPage(t.Name) { BackColor = Theme.Bg };
+                page.Controls.Add(t.Body);
+                tabs.TabPages.Add(page);
+            }
             // Enter = 측정은 기록 탭에서만 (투자율 탭 입력칸에서 Enter를 눌러도 기록 측정이 되지 않도록)
             tabs.SelectedIndexChanged += delegate { AcceptButton = tabs.SelectedIndex == 0 ? btnMeasure : null; };
 
@@ -2628,9 +3157,9 @@ namespace LcrLogger
             {
                 if (restore && muSaved != null)
                 {
-                    // 복소 투자율 측정 직전 값으로 먼저 되돌림 (실패하면 파일에 남은 값으로 다음 연결 때 묻습니다)
-                    try { MeasCond.Restore(meter, muSaved); muSaved = null; PersistPending(); Log("복소 투자율 측정 전 계측기 설정으로 되돌렸습니다."); }
-                    catch (Exception ex) { Log("복소 투자율 측정 전 설정 복원 실패: " + ex.Message); }
+                    // 스윕(복소 투자율·스윕 측정) 직전 값으로 먼저 되돌림 (실패하면 파일에 남은 값으로 다음 연결 때 묻습니다)
+                    try { MeasCond.Restore(meter, muSaved); muSaved = null; PersistPending(); Log("스윕 측정 전 계측기 설정으로 되돌렸습니다."); }
+                    catch (Exception ex) { Log("스윕 측정 전 설정 복원 실패: " + ex.Message); }
                 }
                 if (restore && savedCond != null && connectCond != null)
                 {
@@ -3311,7 +3840,7 @@ namespace LcrLogger
 
         void LoadMuSettings()
         {
-            foreach (var kv in muSettings)
+            foreach (var kv in muSettings.Concat(swSettings))
             {
                 string v = settings.Get(kv.Key, null);
                 if (v == null) continue;
@@ -3331,7 +3860,7 @@ namespace LcrLogger
 
         void SaveMuSettings()
         {
-            foreach (var kv in muSettings)
+            foreach (var kv in muSettings.Concat(swSettings))
             {
                 var n = kv.Value as NumericUpDown;
                 var c = kv.Value as ComboBox;
@@ -3542,18 +4071,7 @@ namespace LcrLogger
             }
             else lblMuFile.Text = status;
 
-            if (muSaved != null && meter == m)
-            {
-                var saved = muSaved;
-                try
-                {
-                    await Io(() => { MeasCond.Restore(m, saved); return true; });
-                    muSaved = null;
-                    PersistPending();
-                    Log("계측기 설정을 측정 전으로 되돌렸습니다.");
-                }
-                catch (Exception ex) { Log("※ 계측기 설정을 되돌리지 못했습니다 (연결을 해제할 때 다시 시도합니다): " + ex.Message); }
-            }
+            await RestoreTemp(m);
             busy = muRunning = false;
             Log("복소 투자율 측정 " + status);
             if (error != null)
@@ -3645,6 +4163,603 @@ namespace LcrLogger
             }
         }
 
+        // 스윕(복소 투자율·스윕 측정) 전 값으로 계측기를 되돌림. 실패하면 연결 해제 때 다시 시도
+        async Task RestoreTemp(IMeter m)
+        {
+            if (muSaved == null || meter != m) return;
+            var saved = muSaved;
+            try
+            {
+                await Io(() => { MeasCond.Restore(m, saved); return true; });
+                muSaved = null;
+                PersistPending();
+                Log("계측기 설정을 측정 전으로 되돌렸습니다.");
+            }
+            catch (Exception ex) { Log("※ 계측기 설정을 되돌리지 못했습니다 (연결을 해제할 때 다시 시도합니다): " + ex.Message); }
+        }
+
+        void SaveAs(string filter, string fileName, Action<string> write)
+        {
+            using (var dlg = new SaveFileDialog { Filter = filter, FileName = fileName, InitialDirectory = txtFolder.Text })
+            {
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                try
+                {
+                    write(dlg.FileName);
+                    Log("저장 완료: " + dlg.FileName);
+                }
+                catch (Exception ex) { MessageBox.Show(this, "저장하지 못했습니다. 파일이 열려 있는지 확인하세요.\n\n" + ex.Message, "저장", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+            }
+        }
+
+        static TableLayoutPanel TabLayout(int autoRows)
+        {
+            var lay = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(0, 8, 4, 0), BackColor = Theme.Bg };
+            lay.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            for (int i = 0; i < autoRows; i++) lay.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            lay.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            return lay;
+        }
+
+        static Label Hint(string text)
+        {
+            var l = Lbl(text);
+            l.ForeColor = Theme.Secondary;
+            return l;
+        }
+
+        // ---------------- 스윕 측정 ----------------
+
+        Control BuildSweepTab()
+        {
+            var lay = TabLayout(3);
+            KeepFillRow(lay, 3, () => Font.Height * 24);
+
+            var pts = Group("스윕 점 (공식 앱 Sweep Measurement)");
+            txtSwName = new TextBox { Width = 140 };
+            cbSwItem = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 140 };
+            cbSwItem.Items.AddRange(Sweep.Items);
+            cbSwItem.SelectedIndex = 0;
+            txtSwStart = new TextBox { Width = 70, Text = "1k" };
+            txtSwStop = new TextBox { Width = 70, Text = "1M" };
+            numSwPoints = new NumericUpDown { Width = 60, Minimum = 1, Maximum = 5000, Value = 50 };
+            cbSwSpacing = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 70 };
+            cbSwSpacing.Items.AddRange(new object[] { "로그", "선형" });
+            cbSwSpacing.SelectedIndex = 0;
+            btnSwMake = Btn("점 목록 만들기", OnSwMake);
+            lblSwUnit = Hint(Sweep.RangeText(0));
+            cbSwItem.SelectedIndexChanged += delegate
+            {
+                int it = cbSwItem.SelectedIndex;
+                lblSwUnit.Text = Sweep.RangeText(it);
+                txtSwStart.Text = it == 0 ? "1k" : it == 3 ? "0.1" : "0.01";   // 항목을 바꾸면 그 항목의 기본 범위로
+                txtSwStop.Text = it == 0 ? "1M" : it == 3 ? "10" : "1";
+                txtSwList.Text = "";
+            };
+            Add(pts, Lbl("시료명"), txtSwName, Lbl("스윕 항목"), cbSwItem, Lbl("시작"), txtSwStart, Lbl("끝"), txtSwStop, Lbl("점 수"), numSwPoints, Lbl("간격"), cbSwSpacing, btnSwMake, lblSwUnit);
+            pts.SetFlowBreak(lblSwUnit, true);
+            txtSwList = new TextBox { Multiline = true, ScrollBars = ScrollBars.Vertical, Width = 560, Height = 54 };
+            var listHint = Hint("점 목록: 쉼표·줄바꿈으로 구분, 직접 고쳐도 됨");
+            Add(pts, Lbl("점 목록"), txtSwList, listHint);
+            pts.SetFlowBreak(listHint, true);
+            numSwRepeat = new NumericUpDown { Width = 70, Minimum = 1, Maximum = 32000, Value = 1 };
+            numSwRepeatWait = new NumericUpDown { Width = 70, Minimum = 0, Maximum = 32000, Value = 0 };
+            numSwDelay = new NumericUpDown { Width = 70, Minimum = 0, Maximum = 32000, Increment = 10, Value = 0 };
+            var ms = Lbl("ms");
+            Add(pts, Lbl("반복 횟수"), numSwRepeat, Lbl("반복 사이 대기"), numSwRepeatWait, Lbl("초   점 사이 대기"), numSwDelay, ms);
+            pts.SetFlowBreak(ms, true);
+            btnSwStart = Btn("측정 시작", OnSwStart, true);
+            btnSwStart.Width = 110;
+            btnSwStop = Btn("중지", delegate { swStopRequested = true; Log("스윕 측정 중지 요청 - 지금 점까지 측정하고 멈춥니다."); });
+            swProgress = new ProgressBar { Width = 220, Height = 14, Margin = new Padding(12, 11, 3, 3) };
+            Add(pts, btnSwStart, btnSwStop, swProgress, Hint("측정값은 계측기의 PAR1~PAR4 (계측기 설정 탭에서 바꿈). 신호 종류·주파수는 끝나면 원래대로 되돌림"));
+            lay.Controls.Add(pts.Parent);
+
+            var result = Group("결과 (끝나면 저장 폴더에 CSV와 그래프 PNG를 자동 저장 · 그래프: 왼쪽 축 PAR1, 오른쪽 축 PAR2)");
+            btnSwCsv = Btn("CSV 다른 이름으로 저장", delegate
+            {
+                if (swRows.Count == 0 || swInfo == null) return;
+                SaveAs("CSV (*.csv)|*.csv", SwDialogName(".csv"), path => File.WriteAllLines(path, Sweep.CsvLines(swInfo, swItem, swPars, swRows), new UTF8Encoding(true)));
+            });
+            btnSwPng = Btn("그래프 PNG 저장", delegate
+            {
+                if (swRows.Count > 0) SaveAs("PNG 그림 (*.png)|*.png", SwDialogName(".png"), path => Permeability.SavePng(swChart, path));
+            });
+            lblSwFile = new Label { AutoSize = true, Margin = new Padding(8, 9, 3, 3), ForeColor = Theme.Secondary };
+            Add(result, btnSwCsv, btnSwPng, lblSwFile);
+            lay.Controls.Add(result.Parent);
+            lay.Controls.Add(new Panel { Height = 0, Margin = Padding.Empty });   // 행 번호를 복소 투자율 탭과 맞춤 (그래프 = 3행)
+
+            swChart = Sweep.NewChart();
+            var chartCard = new Card(null, false) { Padding = new Padding(10, 8, 10, 10) };
+            chartCard.Controls.Add(swChart);
+            lay.Controls.Add(chartCard);
+
+            swSettings = new Dictionary<string, Control>
+            {
+                { "SwName", txtSwName }, { "SwItem", cbSwItem }, { "SwStart", txtSwStart }, { "SwStop", txtSwStop }, { "SwPoints", numSwPoints },
+                { "SwSpacing", cbSwSpacing }, { "SwList", txtSwList }, { "SwRepeat", numSwRepeat }, { "SwRepeatWait", numSwRepeatWait }, { "SwDelay", numSwDelay }
+            };
+            return lay;
+        }
+
+        string SwDialogName(string ext)
+        {
+            return (swStem != null ? Path.GetFileName(swStem) : "SWEEP_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss", CultureInfo.InvariantCulture)) + ext;
+        }
+
+        // 시작·끝·점 수·간격으로 점 목록을 채움 (공식 앱 Auto Setup)
+        void OnSwMake(object sender, EventArgs e)
+        {
+            int it = cbSwItem.SelectedIndex;
+            try
+            {
+                List<double> ends = Sweep.ParsePoints(it, txtSwStart.Text + "," + txtSwStop.Text);
+                bool log = cbSwSpacing.SelectedIndex == 0;
+                List<double> list = Permeability.Frequencies(ends[0], ends[1], (int)numSwPoints.Value, log, it == 0 ? 2 : 6);
+                txtSwList.Text = string.Join(", ", list.Select(v => v.ToString("0.######", CultureInfo.InvariantCulture)));
+            }
+            catch (InvalidOperationException ex) { MessageBox.Show(this, ex.Message, "스윕 측정", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+        }
+
+        async void OnSwStart(object sender, EventArgs e)
+        {
+            if (meter == null || busy || autoRunning) return;
+            if (txtSwList.Text.Trim().Length == 0) OnSwMake(sender, e);
+            int item = cbSwItem.SelectedIndex;
+            List<double> pts;
+            try { pts = Sweep.ParsePoints(item, txtSwList.Text); }
+            catch (InvalidOperationException ex)
+            {
+                MessageBox.Show(this, ex.Message, "스윕 측정", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            IMeter m = meter;
+            int reps = (int)numSwRepeat.Value, waitMs = (int)numSwRepeatWait.Value * 1000, delay = (int)numSwDelay.Value, total = pts.Count * reps;
+            string name = txtSwName.Text.Trim();
+            bool logX = cbSwSpacing.SelectedIndex == 0 && pts.Min() > 0;
+            busy = swRunning = true;
+            swStopRequested = false;
+            swRows = new List<SweepRow>();
+            swInfo = null;
+            swStem = null;
+            swItem = item;
+            lblSwFile.Text = "측정 중...";
+            lblSwFile.ForeColor = Theme.Secondary;
+            swProgress.Maximum = total;
+            swProgress.Value = 0;
+            UpdateUi();
+            DateTime started = DateTime.Now;
+            string status = "완료", meterCond = "";
+            Exception error = null;
+            Log("스윕 측정 시작: " + Sweep.Items[item] + " " + pts.Count + "점 × " + reps + "회");
+            try
+            {
+                var lines = new List<string>();
+                // 앞 측정에서 되돌리지 못한 값이 남아 있으면 그것이 진짜 원래 값이므로 유지
+                try { var applied = await Io(() => Permeability.ApplyTemp(m, Sweep.Cond(item, pts[0]), lines)); if (muSaved == null) muSaved = applied; }
+                finally { foreach (string l in lines) Log(l); }
+                PersistPending();   // 측정 중 프로그램이 죽어도 다음 연결 때 되돌릴 수 있도록
+                swPars = await Io(() => Enumerable.Range(1, 4).Select(i => m.Query(":PARameter" + i + "?").Trim().ToUpperInvariant()).Where(p => p.Length > 0 && p != "OFF").ToList());
+                if (swPars.Count == 0) throw new InvalidOperationException("계측기의 PAR1~PAR4가 모두 OFF입니다. [계측기 설정] 탭에서 측정할 파라미터를 고르세요.");
+                meterCond = await Io(() => MeasCond.Summary(m));
+                Sweep.ClearChart(swChart, (name.Length > 0 ? name + "  ·  " : "") + Sweep.Items[item] + " 스윕", item, swPars, logX, pts.Min(), pts.Max());
+                Log("측정 파라미터: " + string.Join(", ", swPars.Select(Fmt.DisplayName)));
+                SetTimeout(m, 60000);   // 저주파·SLOW2·평균이 많으면 한 점에 수 초 이상 걸림
+                for (int rep = 1; rep <= reps && !swStopRequested; rep++)
+                {
+                    for (int w = 0; rep > 1 && w < waitMs && !swStopRequested; w += 100) await Task.Delay(100);
+                    for (int i = 0; i < pts.Count && !swStopRequested; i++)
+                    {
+                        double v = pts[i];
+                        int n = swPars.Count;
+                        SweepRow row = await Io(() => Sweep.MeasurePoint(m, item, v, n));
+                        if (IsDisposed) return;
+                        row.Rep = rep;
+                        row.No = i + 1;
+                        if (swRows.Count == 0) Log("첫 점 응답 (:MEAS? | :MONI?): " + row.Raw);
+                        swRows.Add(row);
+                        Sweep.AddPoint(swChart, row, swPars);
+                        swProgress.Value = swRows.Count;
+                        if (delay > 0) await Task.Delay(delay);
+                    }
+                }
+                if (swStopRequested) status = "중지됨 (" + swRows.Count + "/" + total + "점)";
+            }
+            catch (Exception ex)
+            {
+                error = ex;
+                status = "오류로 중단 (" + swRows.Count + "/" + total + "점): " + ex.Message.Split('\n')[0];
+            }
+            if (IsDisposed) return;
+            SetTimeout(m, 5000);
+
+            // 받은 데이터부터 저장 (계측기 복원이 실패해도 데이터는 남도록)
+            if (swRows.Count > 0)
+            {
+                Func<string, string, KeyValuePair<string, string>> kv = (k, v) => new KeyValuePair<string, string>(k, v);
+                swInfo = new List<KeyValuePair<string, string>>
+                {
+                    kv("측정 일시", started.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
+                    kv("시료명", name),
+                    kv("스윕 항목", Sweep.Items[item]),
+                    kv("점", pts.Count + "점 (" + string.Join(", ", pts.Select(p => p.ToString("0.######", CultureInfo.InvariantCulture))) + ")"),
+                    kv("반복", reps + "회, 반복 사이 " + numSwRepeatWait.Value + "초, 점 사이 " + delay + " ms"),
+                    kv("파라미터", string.Join(", ", swPars.Select(Fmt.DisplayName))),
+                    kv("계측기", currentIdn ?? ""),
+                    kv("계측기 조건", meterCond),
+                    kv("상태", status)
+                };
+                try
+                {
+                    Directory.CreateDirectory(txtFolder.Text);
+                    string file = Sweep.FileStem(name, started), stem = Path.Combine(txtFolder.Text, file);
+                    for (int k = 2; File.Exists(stem + ".csv") || File.Exists(stem + ".png"); k++) stem = Path.Combine(txtFolder.Text, file + "_" + k);
+                    File.WriteAllLines(stem + ".csv", Sweep.CsvLines(swInfo, item, swPars, swRows), new UTF8Encoding(true));
+                    Permeability.SavePng(swChart, stem + ".png");
+                    swStem = stem;
+                    lblSwFile.Text = Path.GetFileName(stem) + ".csv / .png  (" + status + ")";
+                    Log("스윕 측정 저장: " + stem + ".csv, .png");
+                }
+                catch (Exception ex)
+                {
+                    lblSwFile.Text = "자동 저장 실패 - [CSV 다른 이름으로 저장]으로 저장하세요";
+                    lblSwFile.ForeColor = Theme.Red;
+                    Log("※ 스윕 측정 자동 저장 실패: " + ex.Message);
+                }
+            }
+            else lblSwFile.Text = status;
+
+            await RestoreTemp(m);
+            busy = swRunning = false;
+            Log("스윕 측정 " + status);
+            if (error != null)
+            {
+                if (IsDisconnect(error, m)) OnLost("USB 연결이 끊어졌습니다: " + error.Message);
+                else
+                {
+                    SystemSounds.Hand.Play();
+                    MessageBox.Show(this, "측정을 멈췄습니다. 그때까지 받은 " + swRows.Count + "점은 저장했습니다.\n\n" + error.Message, "스윕 측정", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+            else SystemSounds.Asterisk.Play();
+            UpdateUi();
+        }
+
+        // ---------------- 계측기 설정 · 화면 캡처 ----------------
+
+        Control BuildSetTab()
+        {
+            var lay = TabLayout(1);
+            var top = Group("계측기 설정 (공식 앱 Set 화면) · [새 값] 칸에 넣은 항목만 보냄 · 바로 계측기에 적용되고 되돌리지 않음");
+            btnSetRead = Btn("계측기에서 읽기", OnSetRead);
+            btnSetApply = Btn("바꾼 값 적용", OnSetApply, true);
+            Add(top, btnSetRead, btnSetApply, Hint("※ [인덕턴스 기록] 탭의 측정 조건으로 바꾼 항목은 연결을 해제할 때 원래대로 돌아갑니다"));
+            lay.Controls.Add(top.Parent);
+
+            var body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = Theme.Bg, Margin = Padding.Empty };
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 60));
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40));
+            body.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+            setGrid = new DataGridView
+            {
+                Dock = DockStyle.Fill, AllowUserToAddRows = false, AllowUserToDeleteRows = false, AllowUserToResizeRows = false, RowHeadersVisible = false,
+                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, BackgroundColor = Theme.Card, BorderStyle = BorderStyle.None,
+                CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal, ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None, GridColor = Theme.Separator,
+                EnableHeadersVisualStyles = false, ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing, ColumnHeadersHeight = 30,
+                EditMode = DataGridViewEditMode.EditOnEnter
+            };
+            setGrid.RowTemplate.Height = 26;
+            setGrid.ColumnHeadersDefaultCellStyle.BackColor = setGrid.ColumnHeadersDefaultCellStyle.SelectionBackColor = Theme.Card;
+            setGrid.ColumnHeadersDefaultCellStyle.ForeColor = setGrid.ColumnHeadersDefaultCellStyle.SelectionForeColor = Theme.Secondary;
+            setGrid.DefaultCellStyle.SelectionBackColor = Theme.Selection;
+            setGrid.DefaultCellStyle.SelectionForeColor = Theme.Text;
+            string[] heads = { "항목", "명령", "현재 값", "새 값", "입력 범위 · 설명" };
+            int[] weights = { 22, 18, 14, 14, 42 };
+            for (int i = 0; i < heads.Length; i++)
+                setGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = heads[i], FillWeight = weights[i], ReadOnly = i != 3, SortMode = DataGridViewColumnSortMode.NotSortable });
+            foreach (SettingItem s in MeterSettings.Items)
+            {
+                int r = setGrid.Rows.Add(s.Name, s.Cmd, "", "", s.Hint);
+                if (s.Choices == null) continue;
+                var cell = new DataGridViewComboBoxCell { FlatStyle = FlatStyle.Flat };
+                cell.Items.Add("");
+                cell.Items.AddRange(s.Choices);
+                setGrid.Rows[r].Cells[3] = cell;
+            }
+            setGrid.Columns[3].DefaultCellStyle.BackColor = Color.FromArgb(250, 250, 252);
+            var gridCard = new Card(null, false) { Dock = DockStyle.Fill, Padding = new Padding(8) };
+            gridCard.Controls.Add(setGrid);
+            body.Controls.Add(gridCard, 0, 0);
+
+            var shot = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, BackColor = Theme.Bg, Margin = Padding.Empty };
+            shot.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            shot.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            var shotTop = Group("계측기 화면 캡처 (공식 앱 Hard Copy)");
+            btnShotColor = Btn("컬러로 캡처", delegate { OnShot(false); });
+            btnShotMono = Btn("흑백으로 캡처", delegate { OnShot(true); });
+            lblShot = Hint("캡처하면 저장 폴더에 PNG로 저장");
+            Add(shotTop, btnShotColor, btnShotMono, lblShot);
+            shot.Controls.Add(shotTop.Parent);
+            shotBox = new PictureBox { Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.Zoom, BackColor = Theme.Card };
+            var shotCard = new Card(null, false) { Dock = DockStyle.Fill, Padding = new Padding(8) };
+            shotCard.Controls.Add(shotBox);
+            shot.Controls.Add(shotCard);
+            body.Controls.Add(shot, 1, 0);
+            lay.Controls.Add(body);
+            return lay;
+        }
+
+        async void OnSetRead(object sender, EventArgs e)
+        {
+            if (meter == null || busy || autoRunning) return;
+            IMeter m = meter;
+            busy = true;
+            UpdateUi();
+            try
+            {
+                List<string> values = await Io(() => MeterSettings.Items.Select(s => m.Query(s.Cmd + "?").Trim()).ToList());
+                for (int i = 0; i < values.Count; i++)
+                {
+                    setGrid.Rows[i].Cells[2].Value = values[i];
+                    setGrid.Rows[i].Cells[3].Value = "";
+                    setGrid.Rows[i].Cells[2].Style.ForeColor = Theme.Text;
+                }
+                Log("계측기 설정을 읽었습니다 (" + values.Count + "개 항목).");
+            }
+            catch (Exception ex)
+            {
+                if (IsDisconnect(ex, m)) OnLost("USB 연결이 끊어졌습니다: " + ex.Message);
+                else MessageBox.Show(this, "설정을 읽지 못했습니다. 계측기 화면이 LCR 모드(일반 측정 화면)인지 확인하세요.\n\n" + ex.Message, "계측기 설정", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            finally
+            {
+                busy = false;
+                UpdateUi();
+            }
+        }
+
+        async void OnSetApply(object sender, EventArgs e)
+        {
+            if (meter == null || busy || autoRunning) return;
+            setGrid.EndEdit();
+            var changes = new List<KeyValuePair<int, string>>();
+            for (int i = 0; i < MeterSettings.Items.Length; i++)
+            {
+                string v = Convert.ToString(setGrid.Rows[i].Cells[3].Value).Trim();
+                if (v.Length > 0) changes.Add(new KeyValuePair<int, string>(i, v));
+            }
+            if (changes.Count == 0)
+            {
+                MessageBox.Show(this, "[새 값] 칸에 바꿀 값을 넣으세요. 먼저 [계측기에서 읽기]로 지금 값을 확인하면 편합니다.", "계측기 설정", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            IMeter m = meter;
+            busy = true;
+            UpdateUi();
+            var failed = new List<string>();
+            try
+            {
+                foreach (var c in changes)
+                {
+                    SettingItem s = MeterSettings.Items[c.Key];
+                    string v = c.Value;
+                    string esr = await Io(() => MeterSettings.Apply(m, s, v));
+                    Log("설정: " + s.Cmd + " " + v + (esr == null ? "" : "  ※ 계측기가 받지 않음 (*ESR? = " + esr + ")"));
+                    if (esr != null) failed.Add(s.Name + " = " + v);
+                }
+                List<string> values = await Io(() => MeterSettings.Items.Select(s => m.Query(s.Cmd + "?").Trim()).ToList());
+                for (int i = 0; i < values.Count; i++)
+                {
+                    bool bad = changes.Any(c => c.Key == i) && failed.Contains(MeterSettings.Items[i].Name + " = " + changes.First(c => c.Key == i).Value);
+                    setGrid.Rows[i].Cells[2].Value = values[i];
+                    setGrid.Rows[i].Cells[2].Style.ForeColor = bad ? Theme.Red : changes.Any(c => c.Key == i) ? Theme.Green : Theme.Text;
+                    if (!bad) setGrid.Rows[i].Cells[3].Value = "";
+                }
+                if (failed.Count > 0)
+                    MessageBox.Show(this, "계측기가 받지 않은 값이 있습니다 (빨간색):\n\n" + string.Join("\n", failed) + "\n\n허용 범위와 다른 설정(예: 같은 파라미터 중복, 레인지 고정 여부)을 확인하세요.",
+                        "계측기 설정", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            catch (Exception ex)
+            {
+                if (IsDisconnect(ex, m)) OnLost("USB 연결이 끊어졌습니다: " + ex.Message);
+                else MessageBox.Show(this, "설정 중 오류: " + ex.Message, "계측기 설정", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            finally
+            {
+                busy = false;
+                UpdateUi();
+            }
+        }
+
+        async void OnShot(bool mono)
+        {
+            if (meter == null || busy || autoRunning) return;
+            IMeter m = meter;
+            busy = true;
+            UpdateUi();
+            lblShot.Text = "계측기 화면을 받는 중...";
+            try
+            {
+                SetTimeout(m, 30000);
+                byte[] data = await Io(() => m.QueryBlock(":HCOPy:DATA? " + (mono ? "monochrome" : "color")));
+                Directory.CreateDirectory(txtFolder.Text);
+                string path = Path.Combine(txtFolder.Text, "SCREEN_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss", CultureInfo.InvariantCulture) + ".png");
+                using (var ms = new MemoryStream(data))
+                using (var img = Image.FromStream(ms))
+                {
+                    img.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                    Image old = shotBox.Image;
+                    shotBox.Image = new Bitmap(img);
+                    if (old != null) old.Dispose();
+                }
+                lblShot.Text = Path.GetFileName(path);
+                Log("계측기 화면 저장: " + path);
+            }
+            catch (Exception ex)
+            {
+                lblShot.Text = "캡처 실패";
+                if (IsDisconnect(ex, m)) OnLost("USB 연결이 끊어졌습니다: " + ex.Message);
+                else MessageBox.Show(this, "계측기 화면을 받지 못했습니다.\n\n" + ex.Message, "화면 캡처", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            finally
+            {
+                SetTimeout(m, 5000);
+                busy = false;
+                UpdateUi();
+            }
+        }
+
+        // ---------------- 계산 도구 (계측기 없이) ----------------
+
+        static ComboBox Combo(int width, IEnumerable<string> items, int selected)
+        {
+            var c = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = width };
+            c.Items.AddRange(items.Cast<object>().ToArray());
+            c.SelectedIndex = selected;
+            return c;
+        }
+
+        Control BuildToolTab()
+        {
+            var lay = TabLayout(2);
+            var acc = Group("정확도 계산 (IM3536, 공식 앱 Calc Accuracy) · 측정값과 조건을 넣으면 오차 범위를 계산");
+            cbAccPara = Combo(90, Im3536Calc.Paras, 3);
+            txtAccMain = new TextBox { Width = 90, Text = "100u" };
+            lblAccMainUnit = Lbl("H");
+            lblAccSub = Lbl("Q");
+            txtAccSub = new TextBox { Width = 70, Text = "50" };
+            txtAccFreq = new TextBox { Width = 70, Text = "1k" };
+            txtAccLevel = new TextBox { Width = 60, Text = "1" };
+            var v = Lbl("V");
+            Add(acc, Lbl("파라미터"), cbAccPara, Lbl("측정값"), txtAccMain, lblAccMainUnit, lblAccSub, txtAccSub, Lbl("주파수"), txtAccFreq, Lbl("레벨"), txtAccLevel, v);
+            acc.SetFlowBreak(v, true);
+            cbAccRange = Combo(80, Im3536Calc.Ranges, 4);
+            var btnAuto = Btn("자동 레인지", delegate
+            {
+                try
+                {
+                    double z, ph;
+                    AccInputs(out z, out ph);
+                    cbAccRange.SelectedIndex = Im3536Calc.AutoRange(z);
+                }
+                catch (InvalidOperationException ex) { lblAccResult.Text = ex.Message; }
+            });
+            cbAccSpeed = Combo(80, Im3536Calc.Speeds, 1);
+            cbAccCable = Combo(60, Im3536Calc.Cables, 0);
+            cbAccBias = Combo(60, new[] { "OFF", "ON" }, 0);
+            numAccTemp = new NumericUpDown { Width = 55, Minimum = 0, Maximum = 40, Value = 23 };
+            var degC = Lbl("°C");
+            Add(acc, Lbl("레인지"), cbAccRange, btnAuto, Lbl("SPEED"), cbAccSpeed, Lbl("케이블 길이"), cbAccCable, Lbl("DC 바이어스"), cbAccBias, Lbl("온도"), numAccTemp, degC);
+            acc.SetFlowBreak(degC, true);
+            lblAccResult = new Label { AutoSize = true, Margin = new Padding(10, 8, 3, 6), ForeColor = Theme.Text, Font = new Font(Theme.FontName, 10F) };
+            Add(acc, Btn("계산", OnAccCalc, true), lblAccResult);
+            cbAccPara.SelectedIndexChanged += delegate
+            {
+                int p = cbAccPara.SelectedIndex;
+                lblAccMainUnit.Text = Im3536Calc.MainUnits[p];
+                lblAccSub.Text = Im3536Calc.SubNames[p];
+                txtAccSub.Enabled = txtAccFreq.Enabled = txtAccLevel.Enabled = p != 5;   // Rdc는 DC·1 V 고정
+            };
+            lay.Controls.Add(acc.Parent);
+
+            var mr = Group("측정 범위 계산 (IM3536, 공식 앱 Calc Measure Range) · 레인지마다 잴 수 있는 Z·L·C 범위");
+            cbMrRange = Combo(80, Im3536Calc.Ranges, 4);
+            cbMrDc = Combo(70, new[] { "AC", "DC (Rdc)" }, 0);
+            txtMrFreq = new TextBox { Width = 70, Text = "1k" };
+            txtMrLevel = new TextBox { Width = 60, Text = "1" };
+            cbMrDc.SelectedIndexChanged += delegate { txtMrFreq.Enabled = txtMrLevel.Enabled = cbMrDc.SelectedIndex == 0; };
+            lblMrResult = new Label { AutoSize = true, Margin = new Padding(10, 8, 3, 6), ForeColor = Theme.Text, Font = new Font(Theme.FontName, 10F) };
+            var v2 = Lbl("V");
+            Add(mr, Lbl("레인지"), cbMrRange, Lbl("측정"), cbMrDc, Lbl("주파수"), txtMrFreq, Lbl("레벨"), txtMrLevel, v2);
+            mr.SetFlowBreak(v2, true);
+            Add(mr, Btn("계산", OnMrCalc, true), lblMrResult);
+            lay.Controls.Add(mr.Parent);
+            lay.Controls.Add(new Panel { BackColor = Theme.Bg });
+            return lay;
+        }
+
+        // 1k, 100u, 2.2n 같은 SI 접두어 입력
+        static bool TryParseSi(string text, out double v)
+        {
+            string t = text.Trim().Replace("µ", "u").Replace("μ", "u");
+            double mul = 1;
+            const string pre = "pnumkMG";
+            double[] muls = { 1e-12, 1e-9, 1e-6, 1e-3, 1e3, 1e6, 1e9 };
+            if (t.Length > 1 && pre.IndexOf(t[t.Length - 1]) >= 0) { mul = muls[pre.IndexOf(t[t.Length - 1])]; t = t.Substring(0, t.Length - 1); }
+            bool ok = Fmt.TryParse(t, out v);
+            v *= mul;
+            return ok;
+        }
+
+        static double SiInput(TextBox t, string name)
+        {
+            double v;
+            if (!TryParseSi(t.Text, out v)) throw new InvalidOperationException(name + " 값 '" + t.Text + "'를 읽을 수 없습니다 (예: 100u, 1k, 2.2n).");
+            return v;
+        }
+
+        void AccInputs(out double z, out double ph)
+        {
+            int p = cbAccPara.SelectedIndex;
+            double main = SiInput(txtAccMain, "측정값"), sub = p == 5 ? 0 : SiInput(txtAccSub, Im3536Calc.SubNames[p]), f = p == 5 ? 0 : SiInput(txtAccFreq, "주파수");
+            Im3536Calc.ToZPh(p, main, sub, f, out z, out ph);
+        }
+
+        static string Eng(double v, string unit)
+        {
+            if (double.IsPositiveInfinity(v)) return "+∞";
+            if (double.IsNegativeInfinity(v)) return "-∞";
+            return Fmt.Pretty(unit == "H" ? "LS" : unit == "F" ? "CS" : "Z", v.ToString("R", CultureInfo.InvariantCulture)).Split('=')[1].Trim();
+        }
+
+        void OnAccCalc(object sender, EventArgs e)
+        {
+            try
+            {
+                int p = cbAccPara.SelectedIndex;
+                double main = SiInput(txtAccMain, "측정값"), sub = p == 5 ? 0 : SiInput(txtAccSub, Im3536Calc.SubNames[p]);
+                double f = p == 5 ? 0 : SiInput(txtAccFreq, "주파수"), lev = p == 5 ? 1 : SiInput(txtAccLevel, "레벨");
+                AccResult r = Im3536Calc.Accuracy(p, main, sub, f, lev, cbAccRange.SelectedIndex, cbAccSpeed.SelectedIndex, cbAccCable.SelectedIndex, cbAccBias.SelectedIndex == 1, (int)numAccTemp.Value);
+                Func<double, string> g = x => double.IsInfinity(x) ? (x > 0 ? "+∞" : "-∞") : x.ToString("G6", CultureInfo.InvariantCulture);
+                string unit = Im3536Calc.MainUnits[p];
+                bool covers = Im3536Calc.Covers(cbAccRange.SelectedIndex, r.Z);
+                lblAccResult.ForeColor = covers ? Theme.Text : Theme.Red;
+                lblAccResult.Text = (covers ? "" : "※ |Z|가 " + Im3536Calc.Ranges[cbAccRange.SelectedIndex] + " 레인지의 측정 범위 밖입니다. [자동 레인지]를 누르세요 (계산식은 공식 앱 그대로라 값은 나오지만 믿을 수 없음)\n")
+                    + Im3536Calc.Paras[p].Split(' ')[0] + " 정확도: " + r.MainMinPct.ToString("+0.000;-0.000", CultureInfo.InvariantCulture) + " % ~ "
+                    + r.MainMaxPct.ToString("+0.000;-0.000", CultureInfo.InvariantCulture) + " %   ("
+                    + Eng(Math.Abs(main) * (1 + r.MainMinPct / 100), unit) + " ~ " + Eng(Math.Abs(main) * (1 + r.MainMaxPct / 100), unit) + ")"
+                    + (p == 5 ? "" : "\n" + Im3536Calc.SubNames[p] + " 범위: " + g(r.SubMin) + " ~ " + g(r.SubMax))
+                    + "\n|Z| = " + Eng(r.Z, "Ω") + ", θ = " + r.Ph.ToString("0.###", CultureInfo.InvariantCulture) + "°  ·  권장 레인지 " + Im3536Calc.Ranges[Im3536Calc.AutoRange(r.Z)]
+                    + "\n" + r.Formula;
+            }
+            catch (InvalidOperationException ex)
+            {
+                lblAccResult.ForeColor = Theme.Red;
+                lblAccResult.Text = ex.Message;
+            }
+        }
+
+        void OnMrCalc(object sender, EventArgs e)
+        {
+            try
+            {
+                bool dc = cbMrDc.SelectedIndex == 1;
+                double f = dc ? 0 : SiInput(txtMrFreq, "주파수"), lev = dc ? 1 : SiInput(txtMrLevel, "레벨"), zmin, zmax;
+                Im3536Calc.MeasRange(cbMrRange.SelectedIndex, dc, f, lev, out zmin, out zmax);
+                lblMrResult.ForeColor = Theme.Text;
+                lblMrResult.Text = (dc ? "Rdc" : "|Z|") + ": " + Eng(zmin, "Ω") + " ~ " + Eng(zmax, "Ω")
+                    + (dc ? "" : "\nL (Ls·Lp): " + Eng(zmin / (2 * Math.PI * f), "H") + " ~ " + Eng(zmax / (2 * Math.PI * f), "H")
+                        + "\nC (Cs·Cp): " + Eng(1 / (2 * Math.PI * f * zmax), "F") + " ~ " + Eng(1 / (2 * Math.PI * f * zmin), "F"));
+            }
+            catch (InvalidOperationException ex)
+            {
+                lblMrResult.ForeColor = Theme.Red;
+                lblMrResult.Text = ex.Message;
+            }
+        }
+
         // ---------------- 공통 ----------------
 
         void UpdateUi()
@@ -3664,11 +4779,16 @@ namespace LcrLogger
             foreach (TextBox t in txtFreq) t.Enabled = editable;
             chkTrg.Enabled = freqs.Count == 0 || !connected;
             btnMeasure.Enabled = connected && !busy && !autoRunning;
-            btnAuto.Enabled = connected && !muRunning;
+            btnAuto.Enabled = connected && !muRunning && !swRunning;
             btnAuto.Text = autoRunning ? "연속 측정 중지" : "연속 측정 시작";
             // 복소 투자율: 측정 중에는 연결 해제와 입력 변경을 막음
-            if (muRunning) btnConnect.Enabled = false;
-            btnMuStart.Enabled = btnDcr.Enabled = connected && !busy && !autoRunning;
+            if (muRunning || swRunning) btnConnect.Enabled = false;
+            btnMuStart.Enabled = btnDcr.Enabled = btnSwStart.Enabled = btnSetRead.Enabled = btnSetApply.Enabled = btnShotColor.Enabled = btnShotMono.Enabled
+                = connected && !busy && !autoRunning;
+            btnSwStop.Enabled = swRunning;
+            foreach (Control c in swSettings.Values) c.Enabled = !swRunning;
+            btnSwMake.Enabled = !swRunning;
+            btnSwCsv.Enabled = btnSwPng.Enabled = !swRunning && swRows.Count > 0;
             btnMuStop.Enabled = muRunning;
             foreach (Control c in muSettings.Values) c.Enabled = !muRunning;
             btnMuCsv.Enabled = btnMuPng.Enabled = !muRunning && muRows.Count > 0;
@@ -3825,6 +4945,7 @@ namespace LcrLogger
                 DemoMeter.UnpluggedUntil = DateTime.MinValue;
                 Check(threw && unplug.Query("*IDN?").StartsWith("HIOKI"), "데모 USB 분리/재연결 흉내");
                 MuSelfTest(m, condKeys, output);
+                ToolsSelfTest(m, output);
                 output.AppendLine("SELFTEST OK");
                 Print(output.ToString());
                 return 0;
@@ -3937,6 +5058,95 @@ namespace LcrLogger
             output.AppendLine("복소 투자율: μ′(1kHz)=" + rowsCc[0].Mu1.ToString("G6", CultureInfo.InvariantCulture) + ", μ″ 최대=" + peak.Mu2.ToString("G5", CultureInfo.InvariantCulture)
                 + " @ " + Fmt.FrequencyLabel(peak.F) + ", 그래프: " + png);
             output.AppendLine("복소 투자율 CSV 예: " + lines[3]);
+        }
+
+        // 스윕 측정, 계측기 설정, 화면 캡처, IM3536 정확도·측정 범위 계산
+        static void ToolsSelfTest(IMeter m, StringBuilder output)
+        {
+            // 점 목록
+            Check(Sweep.ParsePoints(0, "1k, 100k\n1M").SequenceEqual(new[] { 1e3, 1e5, 1e6 }), "스윕 점 목록 (주파수)");
+            Check(Sweep.ParsePoints(3, "0.5;10 50").SequenceEqual(new[] { 0.5, 10, 50 }), "스윕 점 목록 (CC mA)");
+            foreach (var bad in new[] { new { I = 0, T = "9M" }, new { I = 1, T = "6" }, new { I = 3, T = "0.001" }, new { I = 0, T = " " } })
+            {
+                bool threw = false;
+                try { Sweep.ParsePoints(bad.I, bad.T); } catch (InvalidOperationException) { threw = true; }
+                Check(threw, "스윕 점 범위 밖 거부 " + bad.T);
+            }
+
+            // 주파수 스윕: PAR 값 개수, 끝나면 주파수·트리거 복원
+            string[] keys = { ":FREQ?", ":TRIG?", ":LEVel?", ":LEVel:CCURRent?" };
+            string before = string.Join("|", keys.Select(k => m.Query(k)));
+            var pars = Enumerable.Range(1, 4).Select(i => m.Query(":PARameter" + i + "?").ToUpperInvariant()).Where(p => p != "OFF").ToList();
+            var saved = Permeability.ApplyTemp(m, Sweep.Cond(0, 1e3), new List<string>());
+            var rows = Sweep.ParsePoints(0, "1k,10k,100k").Select(hz => Sweep.MeasurePoint(m, 0, hz, pars.Count)).ToList();
+            MeasCond.Restore(m, saved);
+            Check(rows.Count == 3 && rows.All(r => r.Vals.Length == pars.Count && !double.IsNaN(r.Vals[0]) && !double.IsNaN(r.I)), "주파수 스윕 값");
+            Check(string.Join("|", keys.Select(k => m.Query(k))) == before, "주파수 스윕 후 복원");
+
+            // CC 스윕: 점마다 전류를 바꾸고 Imoni가 따라옴, 끝나면 신호 종류·전류 복원
+            saved = Permeability.ApplyTemp(m, Sweep.Cond(3, 1), new List<string>());
+            Check(m.Query(":LEVel?") == "CC", "CC 스윕 신호 종류");
+            var cc = new[] { 1.0, 2, 5 }.Select(ma => Sweep.MeasurePoint(m, 3, ma, pars.Count)).ToList();
+            MeasCond.Restore(m, saved);
+            Check(cc.Select(r => Math.Round(r.I * 1000, 6)).SequenceEqual(new[] { 1.0, 2, 5 }), "CC 스윕 Imoni " + string.Join(",", cc.Select(r => r.I)));
+            Check(string.Join("|", keys.Select(k => m.Query(k))) == before, "CC 스윕 후 복원");
+
+            for (int i = 0; i < cc.Count; i++) { cc[i].Rep = 1; cc[i].No = i + 1; }
+            List<string> lines = Sweep.CsvLines(new List<KeyValuePair<string, string>> { new KeyValuePair<string, string>("시료명", "A") }, 3, pars, cc);
+            Check(lines[2] == "반복,No,정전류 CC [mA],Ls [H],Q,Vmoni [V],Imoni [A],측정시각" && lines[3].StartsWith("1,1,1,") && lines.Count == 6, "스윕 CSV " + lines[2]);
+            Check(Sweep.FileStem("a/b", new DateTime(2026, 11, 13, 1, 2, 3)) == "SWEEP_a_b_2026-11-13_01-02-03", "스윕 파일 이름");
+            using (Charting.Chart chart = Sweep.NewChart())
+            {
+                chart.Size = new Size(600, 400);
+                Sweep.ClearChart(chart, "t", 3, pars, true, 1, 5);
+                cc.ForEach(r => Sweep.AddPoint(chart, r, pars));
+                cc[0].Rep = 2;
+                Sweep.AddPoint(chart, cc[0], pars);
+                string png = Path.Combine(Path.GetTempPath(), "lcr_logger_selftest", "sweep_selftest.png");
+                Permeability.SavePng(chart, png);
+                Check(chart.Series.Count == 4 && chart.Series[0].Points.Count == 3 && new FileInfo(png).Length > 3000, "스윕 그래프 (반복마다 선)");
+            }
+
+            // 계측기 설정: 모든 항목 읽기, 보내면 그대로 읽힘
+            List<string> values = MeterSettings.Items.Select(s => m.Query(s.Cmd + "?")).ToList();
+            Check(values.All(v => v.Length > 0), "설정 항목 모두 읽기 (빈 응답: " + string.Join(",", MeterSettings.Items.Where((s, i) => values[i].Length == 0).Select(s => s.Cmd)) + ")");
+            SettingItem range = MeterSettings.Items.First(s => s.Cmd == ":RANG");
+            Check(MeterSettings.Apply(m, range, "7") == null && m.Query(":RANG?") == "7", "설정 보내기");
+            MeterSettings.Apply(m, range, values[Array.IndexOf(MeterSettings.Items, range)]);
+
+            // 화면 캡처 (데모 BMP)
+            using (var img = Image.FromStream(new MemoryStream(m.QueryBlock(":HCOPy:DATA? color")))) Check(img.Width == 480 && img.Height == 272, "화면 캡처 BMP");
+
+            // 정확도: Ls 100 µH, Q 50, 1 kHz, 1 V, 1Ω 레인지, MED → |Z| 0.62844 Ω, Z ±4.70948 %, θ ±2.47298 °
+            int auto = Im3536Calc.AutoRange(0.6284);
+            AccResult a = Im3536Calc.Accuracy(3, 100e-6, 50, 1e3, 1, auto, 1, 0, false, 23);
+            Check(auto == 1 && Near(a.Z, 0.628444, 1e-5) && Near(a.Ph, 88.85424, 1e-6) && Near(a.AccZ, 4.709477, 1e-6) && Near(a.AccPh, 2.472985, 1e-6), "정확도 Ls-Q " + a.AccZ + " / " + a.AccPh);
+            Check(a.MainMinPct < 0 && a.MainMaxPct > 0 && a.SubMin < 50 && a.SubMax > 50, "정확도 범위 방향");
+            AccResult rdc = Im3536Calc.Accuracy(5, 1, 0, 0, 0, 2, 1, 0, false, 23);
+            Check(Near(rdc.AccZ, 4.65, 1e-9) && Near(rdc.MainMaxPct, 4.65, 1e-9) && Near(rdc.MainMinPct, -4.65, 1e-9), "정확도 Rdc " + rdc.AccZ);
+            Check(Near(Im3536Calc.Accuracy(0, 0.6284, 88, 1e3, 1, 1, 1, 0, false, 33).AccZ, Im3536Calc.Accuracy(0, 0.6284, 88, 1e3, 1, 1, 1, 0, false, 23).AccZ * 2, 1e-9), "온도 계수 (33 °C = 2배)");
+            bool limited = false;
+            try { Im3536Calc.Accuracy(0, 1e7, 0, 1e5, 1, 9, 1, 3, false, 23); } catch (InvalidOperationException) { limited = true; }
+            Check(limited, "케이블·레인지 주파수 한계");
+            for (int p = 0; p < 5; p++)
+            {
+                double z, ph, mm, ss, main = p == 0 ? 50 : p <= 2 ? 1e-9 : 1e-4, sub = p == 0 ? 30 : p <= 2 ? 0.01 : 20;
+                Im3536Calc.ToZPh(p, main, sub, 1e4, out z, out ph);
+                Im3536Calc.FromZPh(p, z, ph, 1e4, out mm, out ss);
+                Check(Near(mm, main, 1e-9) && Near(ss, sub, 1e-9), "Z·θ 변환 왕복 " + Im3536Calc.Paras[p]);
+            }
+
+            // 측정 범위: 1kΩ 레인지 1 kHz 1 V는 넓은 범위 표(80 Ω ~ 10 kΩ), 100mΩ 레인지 5 MHz는 측정 불가
+            double zmin, zmax;
+            Im3536Calc.MeasRange(4, false, 1e3, 1, out zmin, out zmax);
+            Check(zmin == 80 && zmax == 10000, "측정 범위 1kΩ");
+            Im3536Calc.MeasRange(0, true, 0, 0, out zmin, out zmax);
+            Check(zmin == 0.001 && zmax == 0.1, "측정 범위 Rdc 100mΩ");
+            bool noRange = false;
+            try { Im3536Calc.MeasRange(0, false, 5e6, 1, out zmin, out zmax); } catch (InvalidOperationException) { noRange = true; }
+            Check(noRange, "측정 범위 불가 조합");
+            Check(Im3536Calc.Covers(1, 0.6284) && !Im3536Calc.Covers(4, 0.6284) && Im3536Calc.Covers(4, 9000), "레인지 측정 범위 안/밖 판정");
+            output.AppendLine("정확도 예 (Ls 100µH, Q 50, 1kHz): " + a.Formula.Replace("\n", " / "));
         }
 
         // 출력이 파일/파이프로 리다이렉트되면 콘솔 인코딩을 바꿀 수 없으므로 UTF-8 바이트로 직접 씀
