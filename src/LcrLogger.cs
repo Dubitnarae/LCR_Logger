@@ -28,8 +28,8 @@ using Charting = System.Windows.Forms.DataVisualization.Charting;
 [assembly: System.Reflection.AssemblyProduct("LCR Logger")]
 [assembly: System.Reflection.AssemblyCompany("KIM YEONGDO")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 KIM YEONGDO")]
-[assembly: System.Reflection.AssemblyVersion("1.21.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.21.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.22.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.22.0.0")]
 
 namespace LcrLogger
 {
@@ -2331,12 +2331,13 @@ namespace LcrLogger
             chkMulti = new Switch { Text = "사용 - 측정 한 번에 아래 주파수를 차례로 측정해 한 행에 기록", Margin = new Padding(3, 4, 8, 3) };
             multi.Controls.Add(chkMulti);
             multi.SetFlowBreak(chkMulti, true);
-            txtFreq = new TextBox[4];
-            string[] defaults = { "1k", "100k", "200k", "1M" };
+            txtFreq = new TextBox[8];
+            string[] defaults = { "1k", "100k", "200k", "1M", "", "", "", "" };
             for (int i = 0; i < txtFreq.Length; i++)
             {
                 txtFreq[i] = new TextBox { Width = 70, Text = defaults[i] };
                 Add(multi, Lbl("주파수" + (i + 1)), txtFreq[i]);
+                if (i == 3) multi.SetFlowBreak(txtFreq[i], true);   // 4칸씩 두 줄
             }
             var hint = Lbl("Hz · 예: 120, 1k, 100k, 1M · 빈칸은 건너뜀");
             hint.ForeColor = Theme.Secondary;
@@ -2645,8 +2646,8 @@ namespace LcrLogger
             numCount.Value = settings.GetInt("Count", 10, 0, 100000);
             chkMulti.Checked = settings.Get("MultiFreq", "1") == "1";
             string[] savedFreqs = settings.Get("Freqs", "").Split(';');
-            if (savedFreqs.Length == txtFreq.Length)
-                for (int i = 0; i < txtFreq.Length; i++) txtFreq[i].Text = savedFreqs[i];
+            if (savedFreqs.Length > 1)   // 1.21 이전은 4칸으로 저장됨 → 앞 칸만 채우고 나머지는 빈칸
+                for (int i = 0; i < txtFreq.Length; i++) txtFreq[i].Text = i < savedFreqs.Length ? savedFreqs[i] : "";
             // 1.8 이전 설정(CondCv=1)은 CV로 이어받음
             cbLevel.SelectedIndex = settings.GetInt("CondLevel", settings.Get("CondCv", "0") == "1" ? 2 : 0, 0, cbLevel.Items.Count - 1);
             txtCv.Text = settings.Get("LevelValue", settings.Get("CvVolts", txtCv.Text));
@@ -2734,10 +2735,13 @@ namespace LcrLogger
 
                 if (!wrap) { StyleInputs(c); continue; }
                 int index = parent.Controls.GetChildIndex(c);
+                var flow = parent as FlowLayoutPanel;
+                bool brk = flow != null && flow.GetFlowBreak(c);   // 감싸면 SetFlowBreak가 사라지므로 옮겨 줌
                 parent.Controls.Remove(c);
                 var field = new FieldBox(c);
                 parent.Controls.Add(field);
                 parent.Controls.SetChildIndex(field, index);
+                if (brk) flow.SetFlowBreak(field, true);
             }
         }
 
