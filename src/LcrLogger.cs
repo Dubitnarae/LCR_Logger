@@ -1,5 +1,5 @@
 // LCR Logger - HIOKI LCR 미터(IM3536 / IM3523 / IM3533 / IM3590 / IM7580 등)에서
-// 측정값을 USB(가상 COM 포트)로 받아 CSV 파일로 저장하는 프로그램.
+// 측정값을 USB(가상 COM 포트)·RS-232C·LAN·GPIB로 받아 CSV 파일로 저장하는 프로그램.
 //
 // 통신 사양은 HIOKI "LCR Meter Sample Application" 1.4.0 분석 결과를 따름:
 //   - USB 연결은 가상 COM 포트 (HIOKI USB VID = 108F)
@@ -16,6 +16,7 @@ using System.IO.Ports;
 using System.Linq;
 using System.Management;
 using System.Media;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -28,8 +29,8 @@ using Charting = System.Windows.Forms.DataVisualization.Charting;
 [assembly: System.Reflection.AssemblyProduct("LCR Logger")]
 [assembly: System.Reflection.AssemblyCompany("KIM YEONGDO")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 KIM YEONGDO")]
-[assembly: System.Reflection.AssemblyVersion("1.24.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.24.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.25.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.25.0.0")]
 
 namespace LcrLogger
 {
@@ -266,7 +267,212 @@ namespace LcrLogger
         byte[] QueryBlock(string command);   // 바이너리 블록 응답 (#<자릿수><길이><데이터>), 예: 화면 캡처
     }
 
-    class SerialMeter : IMeter
+    // 응답 대기 시간을 바꿀 수 있는 연결 (USB·RS-232C·LAN·GPIB)
+    interface ITimed
+    {
+        int TimeoutMs { get; set; }
+    }
+
+    static class Block
+    {
+        // '#', 길이 자릿수 n, n자리 길이, 데이터 순서로 읽음 (끝 문자는 읽지 않음)
+        public static byte[] Read(Stream s, string command)
+        {
+            if (s.ReadByte() != '#') throw new InvalidDataException("'" + command + "' 응답이 바이너리 블록(#)이 아닙니다.");
+            int digits = s.ReadByte() - '0';
+            var len = new StringBuilder();
+            for (int i = 0; i < digits && i < 9; i++) len.Append((char)s.ReadByte());
+            int size;
+            if (digits < 1 || digits > 9 || !int.TryParse(len.ToString(), out size) || size <= 0)
+                throw new InvalidDataException("'" + command + "' 블록 길이를 읽을 수 없습니다 (" + len + ").");
+            var data = new byte[size];
+            for (int got = 0; got < size; )
+            {
+                int n = s.Read(data, got, size - got);
+                if (n <= 0) throw new IOException("'" + command + "' 블록 데이터가 중간에 끊겼습니다.");
+                got += n;
+            }
+            return data;
+        }
+    }
+
+    // LAN: 계측기의 통신 포트(기본 3500)에 TCP로 연결. 공식 앱 LAN.cs와 같은 방식 (CR+LF 보내고 LF까지 받음)
+    class LanMeter : IMeter, ITimed
+    {
+        readonly TcpClient client;
+        readonly NetworkStream stream;
+        public readonly string Address;
+
+        public int TimeoutMs { get { return stream.ReadTimeout; } set { stream.ReadTimeout = value; } }
+
+        public LanMeter(string host, int port)
+        {
+            Address = host + ":" + port;
+            client = new TcpClient { NoDelay = true };
+            try
+            {
+                // 기본 Connect는 주소가 틀리면 20초 넘게 멈추므로 5초만 기다림
+                if (!client.ConnectAsync(host, port).Wait(5000))
+                    throw new TimeoutException(Address + " 에 연결하지 못했습니다 (5초). 계측기의 IP 주소·포트와 LAN 케이블을 확인하세요.");
+            }
+            catch (AggregateException ex)
+            {
+                client.Close();
+                throw new IOException(Address + " 연결 실패: " + ex.InnerException.Message, ex.InnerException);
+            }
+            catch { client.Close(); throw; }
+            stream = client.GetStream();
+            stream.ReadTimeout = 5000;
+            stream.WriteTimeout = 3000;
+        }
+
+        public void Send(string command)
+        {
+            byte[] b = Encoding.ASCII.GetBytes(command + "\r\n");
+            stream.Write(b, 0, b.Length);
+        }
+
+        void Discard()
+        {
+            var buf = new byte[4096];
+            while (stream.DataAvailable) stream.Read(buf, 0, buf.Length);
+        }
+
+        Exception Timeout(IOException ex, string command)
+        {
+            var se = ex.InnerException as SocketException;
+            if (se != null && se.SocketErrorCode == SocketError.TimedOut)
+                return new TimeoutException("'" + command + "' 응답 없음 (" + stream.ReadTimeout / 1000 + "초). 계측기의 인터페이스 설정(LAN)을 확인하세요.");
+            return null;
+        }
+
+        public string Query(string command)
+        {
+            Discard();
+            Send(command);
+            var line = new List<byte>();
+            try
+            {
+                for (int b; (b = stream.ReadByte()) != '\n'; )
+                {
+                    if (b < 0) throw new IOException("계측기가 LAN 연결을 끊었습니다.");
+                    line.Add((byte)b);
+                }
+            }
+            catch (IOException ex) { throw Timeout(ex, command) ?? ex; }
+            return Encoding.ASCII.GetString(line.ToArray()).Trim();
+        }
+
+        public byte[] QueryBlock(string command)
+        {
+            Discard();
+            Send(command);
+            try
+            {
+                byte[] data = Block.Read(stream, command);
+                Thread.Sleep(100);
+                Discard();   // 끝 문자
+                return data;
+            }
+            catch (IOException ex) { throw Timeout(ex, command) ?? ex; }
+        }
+
+        public void Dispose()
+        {
+            try { client.Close(); }
+            catch (SocketException) { }
+        }
+    }
+
+    // GPIB: NI-VISA 또는 Keysight IO Libraries의 visa32.dll을 직접 부름 (공식 앱은 NI-488.2 .NET 라이브러리 사용)
+    class GpibMeter : IMeter, ITimed
+    {
+        [DllImport("visa32.dll")] static extern int viOpenDefaultRM(out int rm);
+        [DllImport("visa32.dll")] static extern int viOpen(int rm, string rsrc, int mode, int timeout, out int vi);
+        [DllImport("visa32.dll")] static extern int viClose(int vi);
+        [DllImport("visa32.dll")] static extern int viSetAttribute(int vi, int attr, IntPtr value);
+        [DllImport("visa32.dll")] static extern int viWrite(int vi, byte[] buf, int count, out int ret);
+        [DllImport("visa32.dll")] static extern int viRead(int vi, byte[] buf, int count, out int ret);
+
+        const int AttrTimeout = 0x3FFF001A;                 // VI_ATTR_TMO_VALUE
+        const int SuccessMaxCount = 0x3FFF0006;             // VI_SUCCESS_MAX_CNT: 버퍼가 차서 더 읽을 것이 있음
+        const int ErrorTimeout = unchecked((int)0xBFFF0015); // VI_ERROR_TMO
+
+        readonly int rm, vi;
+        int timeoutMs = 5000;
+        public readonly string Resource;
+
+        public int TimeoutMs
+        {
+            get { return timeoutMs; }
+            set { Check(viSetAttribute(vi, AttrTimeout, new IntPtr(value)), "대기 시간 설정"); timeoutMs = value; }
+        }
+
+        public GpibMeter(int address)
+        {
+            Resource = "GPIB0::" + address + "::INSTR";
+            try { Check(viOpenDefaultRM(out rm), "VISA 시작"); }
+            catch (DllNotFoundException)
+            {
+                throw new InvalidOperationException("GPIB를 쓰려면 NI-VISA(또는 Keysight IO Libraries)와 GPIB 카드 드라이버를 설치하세요.");
+            }
+            int status = viOpen(rm, Resource, 0, 3000, out vi);
+            if (status < 0)
+            {
+                viClose(rm);
+                throw new IOException(Resource + " 를 열지 못했습니다 (VISA 오류 0x" + status.ToString("X8") + "). GPIB 주소와 케이블, 계측기의 인터페이스 설정(GPIB)을 확인하세요.");
+            }
+            TimeoutMs = 5000;
+        }
+
+        static void Check(int status, string what)
+        {
+            if (status < 0) throw new IOException(what + " 실패 (VISA 오류 0x" + status.ToString("X8") + ").");
+        }
+
+        public void Send(string command)
+        {
+            byte[] b = Encoding.ASCII.GetBytes(command + "\r\n");
+            int written;
+            Check(viWrite(vi, b, b.Length, out written), "'" + command + "' 보내기");
+        }
+
+        // 계측기가 EOI로 끝을 알릴 때까지 읽음
+        byte[] ReadAll(string command)
+        {
+            var all = new MemoryStream();
+            var buf = new byte[65536];
+            int status, got;
+            do
+            {
+                status = viRead(vi, buf, buf.Length, out got);
+                if (status == ErrorTimeout) throw new TimeoutException("'" + command + "' 응답 없음 (" + timeoutMs / 1000 + "초). 계측기의 인터페이스 설정(GPIB)을 확인하세요.");
+                Check(status, "'" + command + "' 읽기");
+                all.Write(buf, 0, got);
+            } while (status == SuccessMaxCount);
+            return all.ToArray();
+        }
+
+        public string Query(string command)
+        {
+            Send(command);
+            return Encoding.ASCII.GetString(ReadAll(command)).Trim();
+        }
+
+        public byte[] QueryBlock(string command)
+        {
+            Send(command);
+            return Block.Read(new MemoryStream(ReadAll(command)), command);
+        }
+
+        public void Dispose()
+        {
+            viClose(vi);
+            viClose(rm);
+        }
+    }
+
+    class SerialMeter : IMeter, ITimed
     {
         readonly SerialPort port;
         readonly Stream stream;
@@ -308,7 +514,7 @@ namespace LcrLogger
             }
             catch (TimeoutException)
             {
-                throw new TimeoutException("'" + command + "' 응답 없음 (" + port.ReadTimeout / 1000 + "초). 계측기의 인터페이스 설정(USB)과 케이블을 확인하세요.");
+                throw new TimeoutException("'" + command + "' 응답 없음 (" + port.ReadTimeout / 1000 + "초). 계측기의 인터페이스 설정(USB 또는 RS-232C 속도)과 케이블을 확인하세요.");
             }
         }
 
@@ -2128,7 +2334,7 @@ namespace LcrLogger
 
     class MainForm : Form
     {
-        ComboBox cbPort, cbBaud, cbUnit, cbSpeed, cbBias, cbLevel;
+        ComboBox cbIf, cbPort, cbBaud, cbUnit, cbSpeed, cbBias, cbLevel;
         ComboBox[] cbPar;                           // PAR2~PAR4 (PAR1은 Ls 고정)
         ComboBox cbPreset;                          // 측정 조건 프리셋 (이름을 직접 입력해 저장)
         Button btnApplyCond, btnPresetSave, btnPresetDelete;
@@ -2154,6 +2360,9 @@ namespace LcrLogger
         readonly System.Windows.Forms.Timer watchTimer = new System.Windows.Forms.Timer { Interval = 1000 };
         static readonly string[] ParChoices = { "변경 안 함", "OFF", "Z", "Y", "PHASE", "CS", "CP", "D", "LP", "Q", "RS", "G", "RP", "X", "B", "RDC", "S", "E" };
         bool waitingReconnect, reconnecting, lostDemo;
+        Func<IMeter> netOpener, lostOpener;   // LAN·GPIB 연결을 다시 여는 방법 (USB·RS-232C·데모는 null)
+        int ifShown = -1;
+        string lanAddr = "192.168.0.1:3500", gpibAddr = "1";
         string lostPort, lastPortList;
         int lostBaud, reconnectTries, reconnectGen;
         DateTime portSeenAt = DateTime.MinValue;
@@ -2163,9 +2372,9 @@ namespace LcrLogger
         const int RepeatHotkeyId = 0x4C44;
         ComboBox cbHotkey, cbSheetValues, cbSheetSep, cbSheetEnd;
         NumericUpDown numInterval, numCount;
-        TextBox txtMemo, txtFolder, txtCmd, txtLog;
+        TextBox txtMemo, txtFolder, txtCmd, txtLog, txtAddr;
         TextBox[] txtFreq;
-        Label lblModel, lblFile, lblLast;
+        Label lblModel, lblFile, lblLast, lblPort, lblBaud, lblAddr;
         DataGridView grid;
 
         readonly object ioLock = new object();
@@ -2318,6 +2527,13 @@ namespace LcrLogger
 
             // 1. 연결
             var conn = Group("1. 연결");
+            cbIf = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 130 };
+            cbIf.Items.AddRange(new object[] { "USB / RS-232C", "LAN", "GPIB" });
+            cbIf.SelectedIndex = 0;
+            txtAddr = new TextBox { Width = 170 };
+            lblPort = Lbl("COM 포트");
+            lblBaud = Lbl("속도(RS-232C만)");
+            lblAddr = Lbl("IP:포트");
             cbPort = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330 };
             btnRefresh = Btn("새로고침", delegate { RefreshPorts(); });
             cbBaud = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 80 };
@@ -2328,7 +2544,7 @@ namespace LcrLogger
             btnConnect = Btn("연결", OnConnect, true);
             btnConnect.Width = 90;
             lblModel = new Label { AutoSize = true, Margin = new Padding(8, 9, 3, 3), ForeColor = Theme.Secondary, Text = "연결 안 됨" };
-            Add(conn, Lbl("COM 포트"), cbPort, btnRefresh, Lbl("속도(USB는 무관)"), cbBaud, chkDemo, chkReconnect, btnConnect, lblModel);
+            Add(conn, Lbl("연결 방식"), cbIf, lblPort, cbPort, btnRefresh, lblBaud, cbBaud, lblAddr, txtAddr, chkDemo, chkReconnect, btnConnect, lblModel);
             outer.Controls.Add(conn.Parent);
             outer.Controls.Add(tabs);
 
@@ -2558,6 +2774,8 @@ namespace LcrLogger
             outer.Controls.Add(logCard);
 
             StyleInputs(outer);
+            OnIfChanged();   // FieldBox로 감싼 뒤에 숨겨야 빈 테두리가 남지 않음
+            cbIf.SelectedIndexChanged += delegate { OnIfChanged(); };
             AcceptButton = btnMeasure;
             FormClosing += delegate
             {
@@ -2689,6 +2907,9 @@ namespace LcrLogger
                 cbPar[i].SelectedIndex = settings.GetInt("CondPar" + (i + 2), 0, 0, ParChoices.Length - 1);
             RefreshPresets(null);
             cbBaud.SelectedIndex = settings.GetInt("Baud", 0, 0, cbBaud.Items.Count - 1);
+            lanAddr = settings.Get("LanAddr", lanAddr);
+            gpibAddr = settings.Get("GpibAddr", gpibAddr);
+            cbIf.SelectedIndex = settings.GetInt("Interface", 0, 0, cbIf.Items.Count - 1);
             chkTrg.Checked = settings.Get("ExtTrigger", "0") == "1";
             numInterval.Value = settings.GetInt("IntervalMs", 1000, 200, 3600000) / 1000M;
             numCount.Value = settings.GetInt("Count", 10, 0, 100000);
@@ -2722,6 +2943,10 @@ namespace LcrLogger
             for (int i = 0; i < cbPar.Length; i++)
                 settings.Set("CondPar" + (i + 2), cbPar[i].SelectedIndex.ToString(CultureInfo.InvariantCulture));
             settings.Set("Baud", cbBaud.SelectedIndex.ToString(CultureInfo.InvariantCulture));
+            OnIfChanged();   // 입력 중인 주소를 lanAddr/gpibAddr에 담음
+            settings.Set("Interface", cbIf.SelectedIndex.ToString(CultureInfo.InvariantCulture));
+            settings.Set("LanAddr", lanAddr);
+            settings.Set("GpibAddr", gpibAddr);
             settings.Set("ExtTrigger", chkTrg.Checked ? "1" : "0");
             settings.Set("IntervalMs", ((int)(numInterval.Value * 1000)).ToString(CultureInfo.InvariantCulture));
             settings.Set("Count", ((int)numCount.Value).ToString(CultureInfo.InvariantCulture));
@@ -2816,6 +3041,50 @@ namespace LcrLogger
 
         // ---------------- 연결 ----------------
 
+        // 연결 방식에 맞는 칸만 보이게 하고, 방식마다 따로 기억한 주소를 넣음
+        void OnIfChanged()
+        {
+            if (ifShown == 1) lanAddr = txtAddr.Text.Trim();
+            else if (ifShown == 2) gpibAddr = txtAddr.Text.Trim();
+            ifShown = cbIf.SelectedIndex;
+            bool com = ifShown == 0;
+            foreach (Control c in new Control[] { lblPort, cbPort, btnRefresh, lblBaud, cbBaud }) ShowField(c, com);
+            ShowField(lblAddr, !com);
+            ShowField(txtAddr, !com);
+            lblAddr.Text = ifShown == 2 ? "GPIB 주소(0~30)" : "IP:포트";
+            if (!com) txtAddr.Text = ifShown == 1 ? lanAddr : gpibAddr;
+            chkReconnect.Text = com ? "USB 자동 재연결" : "자동 재연결";
+        }
+
+        static void ShowField(Control c, bool visible)
+        {
+            (c.Parent is FieldBox ? c.Parent : c).Visible = visible;
+        }
+
+        // LAN "IP[:포트]"(포트 생략 시 3500), GPIB "주소" → 연결을 여는 함수. 입력이 틀리면 바로 알림
+        internal static Func<IMeter> NetOpener(int kind, string text)
+        {
+            text = (text ?? "").Trim();
+            if (kind == 2)
+            {
+                int addr;
+                if (!int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out addr) || addr < 0 || addr > 30)
+                    throw new InvalidOperationException("GPIB 주소 '" + text + "'가 올바르지 않습니다. 계측기에 설정된 0~30 사이 번호를 넣으세요.");
+                return () => new GpibMeter(addr);
+            }
+            string host = text;
+            int port = 3500;
+            int colon = text.LastIndexOf(':');
+            if (colon >= 0)
+            {
+                host = text.Substring(0, colon).Trim();
+                if (!int.TryParse(text.Substring(colon + 1), NumberStyles.Integer, CultureInfo.InvariantCulture, out port) || port < 1 || port > 65535)
+                    throw new InvalidOperationException("포트 번호 '" + text.Substring(colon + 1) + "'가 올바르지 않습니다 (예: 192.168.0.1:3500).");
+            }
+            if (host.Length == 0) throw new InvalidOperationException("계측기의 IP 주소를 넣으세요 (예: 192.168.0.1:3500).");
+            return () => new LanMeter(host, port);
+        }
+
         void RefreshPorts()
         {
             cbPort.Items.Clear();
@@ -2854,9 +3123,16 @@ namespace LcrLogger
             UpdateUi();
             try
             {
+                netOpener = null;
                 if (chkDemo.Checked)
                 {
                     m = new DemoMeter();
+                }
+                else if (cbIf.SelectedIndex != 0)
+                {
+                    var open = NetOpener(cbIf.SelectedIndex, txtAddr.Text);
+                    m = await Task.Run(open);
+                    netOpener = open;
                 }
                 else
                 {
@@ -3348,6 +3624,7 @@ namespace LcrLogger
             }
             waitingReconnect = true;
             lostDemo = demo;
+            lostOpener = demo ? null : netOpener;
             lostPort = serial != null ? serial.PortName : null;
             int baud;
             lostBaud = int.TryParse(cbBaud.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out baud) ? baud : 9600;
@@ -3355,7 +3632,7 @@ namespace LcrLogger
             reconnectGen++;
             portSeenAt = DateTime.MinValue;
             lastPortList = null;
-            lblModel.Text = "USB 연결 끊김 - 다시 연결되기를 기다리는 중...";
+            lblModel.Text = (lostOpener != null ? "" : "USB ") + "연결 끊김 - 다시 연결되기를 기다리는 중...";
             lblModel.ForeColor = Theme.Red;
             Log(reason + " 케이블이 다시 연결되면 자동으로 연결합니다.");
             UpdateUi();
@@ -3384,6 +3661,7 @@ namespace LcrLogger
 
             string candidate = null;
             if (lostDemo) candidate = "DEMO";
+            else if (lostOpener != null) candidate = cbIf.Text;
             else
             {
                 string[] names = SerialPort.GetPortNames();
@@ -3416,7 +3694,8 @@ namespace LcrLogger
             try
             {
                 int baud = lostBaud;
-                m = lostDemo ? new DemoMeter() : await Task.Run(() => (IMeter)new SerialMeter(port, baud));
+                var open = lostOpener;
+                m = lostDemo ? new DemoMeter() : open != null ? await Task.Run(open) : await Task.Run(() => (IMeter)new SerialMeter(port, baud));
                 var hs = await Handshake(m, connectCond, false, savedCond != null);
                 if (gen != reconnectGen || meter != null)
                 {
@@ -4218,9 +4497,9 @@ namespace LcrLogger
 
         static void SetTimeout(IMeter m, int ms)
         {
-            var serial = m as SerialMeter;
-            if (serial == null) return;
-            try { serial.TimeoutMs = ms; }
+            var timed = m as ITimed;
+            if (timed == null) return;
+            try { timed.TimeoutMs = ms; }
             catch (IOException) { }
             catch (InvalidOperationException) { }
         }
@@ -4899,7 +5178,7 @@ namespace LcrLogger
             btnConnect.Enabled = !busy || connected;
             // 재연결을 기다리는 동안에는 끊기기 전 설정 그대로 다시 연결하므로 설정을 잠금
             bool editable = !connected && !busy && !waitingReconnect;
-            cbPort.Enabled = btnRefresh.Enabled = cbBaud.Enabled = chkDemo.Enabled = chkMulti.Enabled = editable;
+            cbIf.Enabled = txtAddr.Enabled = cbPort.Enabled = btnRefresh.Enabled = cbBaud.Enabled = chkDemo.Enabled = chkMulti.Enabled = editable;
             // 측정 조건은 연결 중에도 바꿀 수 있음 ([연결 중 적용]으로 반영)
             bool condEditable = !busy && !waitingReconnect && !autoRunning;
             foreach (ComboBox c in cbPar) c.Enabled = condEditable;
@@ -5082,6 +5361,7 @@ namespace LcrLogger
                 Check(Updater.Parse("{\"tag_name\":\"v1.5\",\"assets\":[]}").Asset == null, "첨부 파일 없는 릴리스");
                 Check(MainForm.IsDisconnect(new IOException("x"), new DemoMeter()), "통신 오류는 연결 끊김으로 판단");
                 Check(!MainForm.IsDisconnect(new TimeoutException("x"), new DemoMeter()), "응답 없음은 연결 끊김 아님(데모)");
+                LanSelfTest();
                 var unplug = new DemoMeter();
                 unplug.Send(":DEMO:UNPLUG");
                 bool threw = false;
@@ -5304,6 +5584,49 @@ namespace LcrLogger
                 byte[] bytes = Encoding.UTF8.GetBytes(text);
                 stdout.Write(bytes, 0, bytes.Length);
             }
+        }
+
+        // 내 컴퓨터 안에 가짜 계측기(TCP)를 띄워 LAN 연결의 줄 읽기·블록 읽기·주소 해석을 확인
+        static void LanSelfTest()
+        {
+            bool bad = false;
+            try { MainForm.NetOpener(1, "192.168.0.1:abc"); } catch (InvalidOperationException) { bad = true; }
+            Check(bad, "LAN 잘못된 포트 거부");
+            bad = false;
+            try { MainForm.NetOpener(2, "31"); } catch (InvalidOperationException) { bad = true; }
+            Check(bad, "GPIB 주소 범위 확인");
+
+            var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            listener.Start();
+            int port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+            var server = Task.Run(() =>
+            {
+                using (var c = listener.AcceptTcpClient())
+                using (var s = c.GetStream())
+                {
+                    var r = new StreamReader(s, Encoding.ASCII);
+                    var w = new StreamWriter(s, Encoding.ASCII) { AutoFlush = true, NewLine = "\r\n" };
+                    for (string line; (line = r.ReadLine()) != null; )
+                    {
+                        if (line == "*IDN?") w.WriteLine("HIOKI,IM3536,0,V1.00");
+                        else if (line == ":HCOPy:DATA?") w.WriteLine("#15hello");
+                    }
+                }
+            });
+            try
+            {
+                using (var m = MainForm.NetOpener(1, "127.0.0.1:" + port)())
+                {
+                    Check(m.Query("*IDN?") == "HIOKI,IM3536,0,V1.00", "LAN 응답 한 줄 읽기");
+                    Check(Encoding.ASCII.GetString(m.QueryBlock(":HCOPy:DATA?")) == "hello", "LAN 바이너리 블록 읽기");
+                    ((ITimed)m).TimeoutMs = 300;
+                    bool timedOut = false;
+                    try { m.Query(":NOREPLY?"); } catch (TimeoutException) { timedOut = true; }
+                    Check(timedOut, "LAN 응답 없음은 시간 초과로 알림");
+                }
+                server.Wait(3000);
+            }
+            finally { listener.Stop(); }
         }
 
         static void Check(bool condition, string name)
