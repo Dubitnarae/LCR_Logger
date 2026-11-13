@@ -37,6 +37,7 @@ CSV 파일은 엑셀에서 바로 열 수 있고, 구글 스프레드시트에�
 | `build.bat` | 소스를 고친 뒤 다시 빌드할 때 실행합니다. |
 | `make_release.bat` | 빌드한 뒤 배포용 `release\LCR_Logger_v<버전>.zip`을 만듭니다. zip에는 exe와 `사용설명서.txt`가 들어갑니다. |
 | `publish_release.bat` | `make_release.bat` 후 GitHub 릴리스를 만들어 자동 업데이트로 배포합니다. |
+| `icon.ico`, `make_icon.py` | 프로그램 아이콘(파란 바탕 + 흰 코일 + 노란 기록 그래프). 바꾸려면 `python make_icon.py`(Pillow 필요)로 다시 만든 뒤 빌드합니다. |
 | `사용설명서.txt` | 측정 PC 사용자용 설명서. 배포 zip에 포함됩니다. |
 
 **배포 버전의 동작**
