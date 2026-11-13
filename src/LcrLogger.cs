@@ -28,8 +28,8 @@ using Charting = System.Windows.Forms.DataVisualization.Charting;
 [assembly: System.Reflection.AssemblyProduct("LCR Logger")]
 [assembly: System.Reflection.AssemblyCompany("KIM YEONGDO")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 KIM YEONGDO")]
-[assembly: System.Reflection.AssemblyVersion("1.20.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.20.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.21.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.21.0.0")]
 
 namespace LcrLogger
 {
@@ -425,7 +425,7 @@ namespace LcrLogger
                 {
                     if (Pars[i] == null) continue;
                     string g = m.Query(ParKey(i) + "?");
-                    got.Add("PAR" + (i + 1) + "=" + g);
+                    got.Add("PAR" + (i + 1) + "=" + Fmt.ParLabel(g));
                     if (NormPar(g) != NormPar(Pars[i])) ok = false;
                 }
                 log.Add("측정 조건: " + string.Join(", ", got) + (ok ? "" : "  ※ 계측기가 값을 받지 않았습니다. 같은 파라미터가 겹치지 않는지 확인하세요."));
@@ -727,6 +727,20 @@ namespace LcrLogger
         public static bool IsInductance(string par)
         {
             return par == "LS" || par == "LP";
+        }
+
+        // 목록 표시용: 계측기 화면처럼 기호를 같이 씀 (PHASE (θ), S (σ), E (ε)). Ls·Rdc처럼 대소문자만 다르면 그대로
+        public static string ParLabel(string par)
+        {
+            string d = DisplayName(par);
+            return string.Equals(d, par, StringComparison.OrdinalIgnoreCase) ? par : par + " (" + d + ")";
+        }
+
+        // ParLabel → 계측기 명령 값 ("PHASE (θ)" → "PHASE")
+        public static string ParToken(string label)
+        {
+            int i = label.IndexOf(" (");
+            return i > 0 ? label.Substring(0, i) : label;
         }
 
         public static string DisplayName(string par)
@@ -2359,6 +2373,8 @@ namespace LcrLogger
             {
                 cbPar[i] = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 100 };
                 cbPar[i].Items.AddRange(ParChoices);
+                cbPar[i].FormattingEnabled = true;
+                cbPar[i].Format += (s, e) => e.Value = Fmt.ParLabel((string)e.ListItem);
                 cbPar[i].SelectedIndex = 0;
                 parRow.Add(Lbl("PAR" + (i + 2)));
                 parRow.Add(cbPar[i]);
@@ -4471,7 +4487,7 @@ namespace LcrLogger
                 if (s.Choices == null) continue;
                 var cell = new DataGridViewComboBoxCell { FlatStyle = FlatStyle.Flat };
                 cell.Items.Add("");
-                cell.Items.AddRange(s.Choices);
+                cell.Items.AddRange(s.Choices.Select(Fmt.ParLabel).ToArray());   // 값 중 PAR 기호만 바뀜
                 setGrid.Rows[r].Cells[3] = cell;
             }
             setGrid.Columns[3].DefaultCellStyle.BackColor = Color.FromArgb(250, 250, 252);
@@ -4508,7 +4524,7 @@ namespace LcrLogger
                 List<string> values = await Io(() => MeterSettings.Items.Select(s => m.Query(s.Cmd + "?").Trim()).ToList());
                 for (int i = 0; i < values.Count; i++)
                 {
-                    setGrid.Rows[i].Cells[2].Value = values[i];
+                    setGrid.Rows[i].Cells[2].Value = MeterSettings.Items[i].Cmd.StartsWith(":PARameter") ? Fmt.ParLabel(values[i]) : values[i];
                     setGrid.Rows[i].Cells[3].Value = "";
                     setGrid.Rows[i].Cells[2].Style.ForeColor = Theme.Text;
                 }
@@ -4533,7 +4549,7 @@ namespace LcrLogger
             var changes = new List<KeyValuePair<int, string>>();
             for (int i = 0; i < MeterSettings.Items.Length; i++)
             {
-                string v = Convert.ToString(setGrid.Rows[i].Cells[3].Value).Trim();
+                string v = Fmt.ParToken(Convert.ToString(setGrid.Rows[i].Cells[3].Value).Trim());
                 if (v.Length > 0) changes.Add(new KeyValuePair<int, string>(i, v));
             }
             if (changes.Count == 0)
@@ -4559,7 +4575,7 @@ namespace LcrLogger
                 for (int i = 0; i < values.Count; i++)
                 {
                     bool bad = changes.Any(c => c.Key == i) && failed.Contains(MeterSettings.Items[i].Name + " = " + changes.First(c => c.Key == i).Value);
-                    setGrid.Rows[i].Cells[2].Value = values[i];
+                    setGrid.Rows[i].Cells[2].Value = MeterSettings.Items[i].Cmd.StartsWith(":PARameter") ? Fmt.ParLabel(values[i]) : values[i];
                     setGrid.Rows[i].Cells[2].Style.ForeColor = bad ? Theme.Red : changes.Any(c => c.Key == i) ? Theme.Green : Theme.Text;
                     if (!bad) setGrid.Rows[i].Cells[3].Value = "";
                 }
@@ -4929,6 +4945,7 @@ namespace LcrLogger
                 Check(Fmt.CsvLine(new[] { "a,b", "c\"d" }) == "\"a,b\",\"c\"\"d\"", "CSV 따옴표 처리");
                 Check(Fmt.Pretty("LS", "1.00012E-04") == "Ls = 100.012 µH", "표시 형식");
                 Check(Fmt.Header("PH", 2) == "θ [°]" && Fmt.Header("DC", 2) == "Rdc [Ω]", "IM3536 파라미터 이름");
+                Check(Fmt.ParLabel("PHASE") == "PHASE (θ)" && Fmt.ParLabel("S") == "S (σ)" && Fmt.ParLabel("LS") == "LS" && Fmt.ParLabel("RDC") == "RDC" && Fmt.ParToken("PHASE (θ)") == "PHASE" && Fmt.ParToken("CV") == "CV", "파라미터 기호 병행 표기");
                 Check(m.Query("*TRG;:MEAS?").Split(',').Length == 2, "*TRG;:MEAS? 응답");
                 Check(Updater.IsNewer(Updater.ParseTag("v1.5"), new Version(1, 4, 0, 0)), "새 버전 판별");
                 Check(!Updater.IsNewer(Updater.ParseTag("v1.4"), new Version(1, 4, 0, 0)), "같은 버전은 업데이트 안 함");
