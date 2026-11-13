@@ -28,8 +28,8 @@ using Charting = System.Windows.Forms.DataVisualization.Charting;
 [assembly: System.Reflection.AssemblyProduct("LCR Logger")]
 [assembly: System.Reflection.AssemblyCompany("KIM YEONGDO")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 KIM YEONGDO")]
-[assembly: System.Reflection.AssemblyVersion("1.18.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.18.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.19.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.19.0.0")]
 
 namespace LcrLogger
 {
@@ -483,7 +483,7 @@ namespace LcrLogger
         {
             ":FREQ", ":TRIG", ":DCBias:LEVel", ":DCBias", ":AVER", ":SPEEd", ":LEVel:VOLTage", ":LEVel:CVOLTage", ":LEVel:CCURRent", ":LEVel",
             ":PARameter1", ":PARameter2", ":PARameter3", ":PARameter4",
-            ":RANG", ":RANG:AUTO"   // :RANG n 은 HOLD로 바꾸므로 AUTO를 마지막에
+            ":DCR:RANG", ":DCR:RANG:AUTO"   // :DCR:RANG n 은 HOLD로 바꾸므로 AUTO를 마지막에
         };
 
         // Read로 읽어 둔 값을 되돌림. 저장된 항목만 보내므로 프로그램을 다시 켠 뒤에도 그대로 쓸 수 있음
@@ -593,7 +593,7 @@ namespace LcrLogger
         // [계측기 설정] 탭 항목 중 위에서 따로 흉내 내지 않는 것 (보낸 값을 그대로 돌려줌)
         readonly Dictionary<string, string> extra = new Dictionary<string, string>
         {
-            { ":LIM", "OFF" }, { ":LIM:VOLT", "5.000" }, { ":LIM:CURR", "50.00E-03" }, { ":RANG:AUTO", "ON" }, { ":RANG", "4" },
+            { ":LIM", "OFF" }, { ":LIM:VOLT", "5.000" }, { ":LIM:CURR", "50.00E-03" }, { ":RANG:AUTO", "ON" }, { ":RANG", "4" }, { ":DCR:RANG:AUTO", "ON" }, { ":DCR:RANG", "2" },
             { ":RANG:LOWZ", "OFF" }, { ":TRIG:DEL", "0.0000" }, { ":SSO", "OFF" }, { ":SSO:WAIT", "0.0010" },
             { ":DCR:DCD", "0.0000" }, { ":DCR:ADJD", "0.0030" }, { ":DCR:LFR", "60" }
         };
@@ -656,7 +656,7 @@ namespace LcrLogger
                 foreach (string p in pars)
                 {
                     if (p == "OFF") continue;
-                    double v = p == "LS" || p == "LP" ? l : p == "Q" ? q : p == "D" ? 1 / q : p == "PHASE" ? cth : p == "Z" ? cz : p == "RDC" ? (RdcNoValueCount-- > 0 || (extra[":RANG:AUTO"] == "OFF" && extra[":RANG"] != "1") ? -9.99999E+33 : CoreRw) : 2 * Math.PI * freq * l;
+                    double v = p == "LS" || p == "LP" ? l : p == "Q" ? q : p == "D" ? 1 / q : p == "PHASE" ? cth : p == "Z" ? cz : p == "RDC" ? (RdcNoValueCount-- > 0 || (extra[":DCR:RANG:AUTO"] == "OFF" && extra[":DCR:RANG"] != "1") ? -9.99999E+33 : CoreRw) : 2 * Math.PI * freq * l;
                     values.Add(v.ToString("0.00000E+00", CultureInfo.InvariantCulture));
                 }
                 return string.Join(",", values);
@@ -1039,10 +1039,10 @@ namespace LcrLogger
             var saved = ApplyTemp(m, new MeasCond { Pars = new[] { "RDC", "OFF", "OFF", "OFF" } }, log);
             try
             {
-                // AC 측정용 레인지(HOLD)가 그대로면 수십 mΩ 권선은 UNDERFLOW(-9.99999E+33) → 잠시 자동 레인지
-                saved[":RANG"] = m.Query(":RANG?").Trim();
-                saved[":RANG:AUTO"] = m.Query(":RANG:AUTO?").Trim();
-                m.Send(":RANG:AUTO ON");
+                // IM3536 Rdc는 AC와 별도인 DC 레인지(:DCR:RANG)를 씀. HOLD면 수십 mΩ 권선은 UNDERFLOW(-9.99999E+33) → 잠시 자동 레인지
+                saved[":DCR:RANG"] = m.Query(":DCR:RANG?").Trim();
+                saved[":DCR:RANG:AUTO"] = m.Query(":DCR:RANG:AUTO?").Trim();
+                m.Send(":DCR:RANG:AUTO ON");
                 string resp = "";
                 for (int i = 0; i < 5; i++)
                 {
@@ -1052,7 +1052,7 @@ namespace LcrLogger
                     if (!double.IsNaN(r)) return r;
                     log.Add("Rdc 응답 " + resp + " (측정값 없음) - 다시 잽니다.");
                 }
-                throw new InvalidOperationException("계측기가 Rdc 값을 주지 않았습니다 (응답 " + resp + " = 측정값 없음/UNDERFLOW, 자동 레인지로 다시 잰 결과).\n"
+                throw new InvalidOperationException("계측기가 Rdc 값을 주지 않았습니다 (응답 " + resp + " = 측정값 없음/UNDERFLOW, DC 자동 레인지로 다시 잰 결과, DC 레인지 " + m.Query(":DCR:RANG?").Trim() + "번).\n"
                     + "코일이 측정 단자에 연결되어 있는지, 계측기에서 직접 Rdc를 골랐을 때 값이 나오는지 확인하세요.\n"
                     + "값이 나오지 않으면 멀티미터 등으로 잰 값을 Rw 칸에 직접 입력하세요.");
             }
@@ -4987,9 +4987,9 @@ namespace LcrLogger
             try { Permeability.MeasureRdc(m, new List<string>()); } catch (InvalidOperationException) { noRdc = true; }
             DemoMeter.RdcNoValueCount = 0;
             Check(noRdc && m.Query(":PAR1?") != "RDC", "Rdc 값이 끝내 없으면 오류, PAR 복원");
-            m.Send(":RANG 6"); m.Send(":RANG:AUTO OFF");   // AC용 10kΩ HOLD → 그대로 재면 UNDERFLOW
-            Check(Near(Permeability.MeasureRdc(m, new List<string>()), DemoMeter.CoreRw, 1e-9) && m.Query(":RANG?") == "6" && m.Query(":RANG:AUTO?") == "OFF", "Rdc는 자동 레인지로 재고 HOLD 레인지 복원");
-            m.Send(":RANG:AUTO ON");
+            m.Send(":DCR:RANG 6"); m.Send(":DCR:RANG:AUTO OFF");   // DC 레인지 10kΩ HOLD → 그대로 재면 UNDERFLOW
+            Check(Near(Permeability.MeasureRdc(m, new List<string>()), DemoMeter.CoreRw, 1e-9) && m.Query(":DCR:RANG?") == "6" && m.Query(":DCR:RANG:AUTO?") == "OFF", "Rdc는 DC 자동 레인지로 재고 HOLD 레인지 복원");
+            m.Send(":DCR:RANG:AUTO ON");
 
             List<double> fl = Permeability.Frequencies(1e3, 8e6, 100, true);
             Check(fl.Count == 100 && fl[0] == 1e3 && fl[99] == 8e6 && Near(fl[1] / fl[0], Math.Pow(8000, 1 / 99.0), 1e-4), "로그 간격 주파수");
