@@ -220,6 +220,7 @@ namespace LcrLogger
                     string file = Sweep.FileStem(name, started), stem = Path.Combine(txtFolder.Text, file);
                     for (int k = 2; File.Exists(stem + ".csv") || File.Exists(stem + ".png"); k++) stem = Path.Combine(txtFolder.Text, file + "_" + k);
                     File.WriteAllLines(stem + ".csv", Sweep.CsvLines(swInfo, item, swPars, swRows), new UTF8Encoding(true));
+                    Permeability.ZoomReset(swChart);   // 자동 저장 그림은 늘 전체 범위
                     Permeability.SavePng(swChart, stem + ".png");
                     swStem = stem;
                     lblSwFile.Text = Path.GetFileName(stem) + ".csv / .png  (" + status + ")";

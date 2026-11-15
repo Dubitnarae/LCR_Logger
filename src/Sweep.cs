@@ -124,7 +124,8 @@ namespace LcrLogger
             chart.Titles[0].Text = title;
             var a = chart.ChartAreas[0];
             a.AxisX.Title = Items[item];
-            a.AxisX.LabelStyle.Format = item == 0 ? "#,0" : "G4";
+            a.AxisX.LabelStyle.Format = item == 0 ? "SI" : "G4";
+            a.Tag = null;
             a.AxisX.IsLogarithmic = false;
             a.AxisX.Minimum = Math.Min(min, max);
             a.AxisX.Maximum = Math.Max(min, max) > Math.Min(min, max) ? Math.Max(min, max) : Math.Min(min, max) * 1.01 + 1e-9;
@@ -133,6 +134,12 @@ namespace LcrLogger
             a.AxisY2.Title = pars.Count > 1 ? Fmt.Header(pars[1], 0) : "";
             chart.Tag = logX;
         }
+
+        static readonly Color[] RepColors =
+        {
+            Theme.Accent, Color.FromArgb(230, 81, 0), Color.FromArgb(46, 125, 50), Color.FromArgb(142, 36, 170),
+            Color.FromArgb(0, 131, 143), Color.FromArgb(198, 40, 40), Color.FromArgb(109, 76, 65), Color.FromArgb(84, 110, 122)
+        };
 
         public static void AddPoint(Charting.Chart chart, SweepRow r, List<string> pars)
         {
@@ -144,7 +151,13 @@ namespace LcrLogger
                 Charting.Series s = chart.Series.FindByName(name);
                 if (s == null)
                 {
-                    s = new Charting.Series(name) { ChartType = Charting.SeriesChartType.Line, BorderWidth = 2 };
+                    // 같은 반복의 PAR1·PAR2는 같은 색 (짝을 알아보게)
+                    var ax = chart.ChartAreas[0].AxisX;
+                    s = new Charting.Series(name)
+                    {
+                        ChartType = Charting.SeriesChartType.Line, BorderWidth = 2, Color = RepColors[(r.Rep - 1) % RepColors.Length],
+                        ToolTip = "#SERIESNAME\n" + ax.Title + " = #VALX{" + ax.LabelStyle.Format + "}\n값 = #VALY{G5}"
+                    };
                     // 점선은 점이 많으면 실선처럼 보여서 ◆ 표식으로 구분
                     if (k == 1) { s.YAxisType = Charting.AxisType.Secondary; s.MarkerStyle = Charting.MarkerStyle.Diamond; s.MarkerSize = 8; }
                     chart.Series.Add(s);

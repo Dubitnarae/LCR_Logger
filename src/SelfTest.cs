@@ -260,6 +260,27 @@ namespace LcrLogger
             rise.Add(new MuRow { F = 2.5e6, Z = 1, Theta = -80, Mu1 = -50 });
             rw = Permeability.Warnings(rise, cond);
             Check(rw.Count == 1 && rw[0].Contains("대략 500kHz 이하") && rw[0].Contains("5% 넘게"), "μ′ 기울기로 신뢰 구간 " + rw[0]);
+            // 그래프에 신뢰 구간 밖 회색 띠(500 kHz~끝)와 공진 세로선(2.5 MHz), 축 글자 1k·1M
+            using (Charting.Chart chart = Permeability.NewChart())
+            {
+                chart.Size = new Size(900, 500);
+                Permeability.ClearChart(chart, "trust", 1e3, 8e6);
+                rise.ForEach(r => Permeability.AddPoint(chart, r));
+                Permeability.MarkTrust(chart, rise);
+                var sl = chart.ChartAreas[0].AxisX.StripLines;
+                Check(sl.Count == 2 && Math.Abs(sl[0].IntervalOffset - Math.Log10(5e5)) < 1e-9 && Math.Abs(sl[1].IntervalOffset - Math.Log10(2.5e6)) < 1e-9, "신뢰 구간 띠·공진선");
+                Permeability.SavePng(chart, Path.Combine(Path.GetTempPath(), "lcr_logger_selftest", "mu_trust_selftest.png"));
+                // 끌어서 확대(로그축 커서 위치는 log10 값) → 그려도 오류 없음 → 더블클릭 복원
+                Charting.Axis ax = chart.ChartAreas[0].AxisX;
+                Permeability.ZoomTo(chart.ChartAreas[0], 4, 6);
+                Check(Math.Abs(ax.Minimum - 1e4) < 1e-6 && Math.Abs(ax.Maximum - 1e6) < 1e-3, "확대 범위 10k~1M");
+                Permeability.SavePng(chart, Path.Combine(Path.GetTempPath(), "lcr_logger_selftest", "mu_zoom_selftest.png"));
+                Permeability.ZoomReset(chart);
+                Check(ax.Minimum == 1e3 && ax.Maximum == 8e6, "확대 복원");
+                Permeability.MarkTrust(chart, rise.Take(3).ToList());
+                Check(sl.Count == 0, "공진 없으면 띠 없음");
+            }
+            Check(Fmt.Si(1000) == "1k" && Fmt.Si(2.5e6) == "2.5M" && Fmt.Si(100) == "100", "축 글자 1k·2.5M");
 
             // CC 설정값과 비교: 실측 NX4처럼 처음엔 설정보다 많이 흐르고(최소 신호 한계), 고주파에선 모자람(출력 전압 한계 ~1 V)
             var cc10 = new MeasCond { Level = "CC", LevelValue = 10e-6 };
@@ -362,6 +383,7 @@ namespace LcrLogger
                 string png = Path.Combine(Path.GetTempPath(), "lcr_logger_selftest", "sweep_selftest.png");
                 Permeability.SavePng(chart, png);
                 Check(chart.Series.Count == 4 && chart.Series[0].Points.Count == 3 && new FileInfo(png).Length > 3000, "스윕 그래프 (반복마다 선)");
+                Check(chart.Series[0].Color == chart.Series[1].Color && chart.Series[2].Color == chart.Series[3].Color && chart.Series[0].Color != chart.Series[2].Color, "스윕 반복별 같은 색");
             }
 
             // 계측기 설정: 모든 항목 읽기, 보내면 그대로 읽힘

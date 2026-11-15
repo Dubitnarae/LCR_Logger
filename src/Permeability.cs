@@ -171,17 +171,51 @@ namespace LcrLogger
         }
 
         // cond: 측정에 쓴 조건 (CC이면 Imoni를 설정 전류와 비교, V/CV이면 첫 점과 비교)
+        // 자기공진 의심 점(μ′ 음수 또는 θ 부호 바뀜)과 신뢰 한계 주파수. 없으면 null
+        public static MuRow Resonance(List<MuRow> rows, out double limit, out bool bySlope)
+        {
+            limit = double.NaN;
+            bySlope = false;
+            var valid = rows.Where(r => !double.IsNaN(r.Z) && !double.IsNaN(r.Theta)).ToList();
+            if (valid.Count == 0) return null;
+            int sign = Math.Sign(valid[0].Theta);
+            MuRow res = valid.FirstOrDefault(r => r.Mu1 < 0 || Math.Sign(r.Theta) != sign);
+            if (res != null) limit = TrustLimit(valid, res, out bySlope);
+            return res;
+        }
+
+        // 신뢰 구간 밖(한계 주파수 위)을 회색 띠로, 공진 의심 주파수에 빨간 세로선
+        public static void MarkTrust(Charting.Chart chart, List<MuRow> rows)
+        {
+            Charting.Axis x = chart.ChartAreas[0].AxisX;
+            x.StripLines.Clear();
+            double limit;
+            bool bySlope;
+            MuRow res = Resonance(rows, out limit, out bySlope);
+            if (res == null) return;
+            Func<double, double> pos = v => x.IsLogarithmic ? Math.Log10(v) : v;   // 로그축의 띠 위치는 log10 값으로 줌
+            var font = new Font(Theme.FontName, 8.5F);
+            x.StripLines.Add(new Charting.StripLine
+            {
+                IntervalOffset = pos(limit), StripWidth = pos(limit * 1e4) - pos(limit),   // 축 끝을 넘는 부분은 잘림 (확대·복원해도 끝까지 칠해짐)
+                BackColor = Color.FromArgb(45, 120, 120, 120),
+                Text = "신뢰 구간 밖 (" + RoughFreq(limit) + " 초과)\n빨간 선: 자기공진 의심 " + Fmt.FrequencyLabel(res.F), Font = font, ForeColor = Theme.Secondary,
+                TextAlignment = StringAlignment.Near, TextLineAlignment = StringAlignment.Near, TextOrientation = Charting.TextOrientation.Horizontal
+            });
+            x.StripLines.Add(new Charting.StripLine
+            {
+                IntervalOffset = pos(res.F), StripWidth = 0, BorderColor = Theme.Red, BorderWidth = 2   // 세로선 글자는 한글이 눕혀져 띠 글자에 같이 씀
+            });
+        }
+
         public static List<string> Warnings(List<MuRow> rows, MeasCond cond)
         {
             var w = new List<string>();
-            var valid = rows.Where(r => !double.IsNaN(r.Z) && !double.IsNaN(r.Theta)).ToList();
-            if (valid.Count == 0) return w;
-            int sign = Math.Sign(valid[0].Theta);
-            MuRow res = valid.FirstOrDefault(r => r.Mu1 < 0 || Math.Sign(r.Theta) != sign);
+            double limit;
+            bool bySlope;
+            MuRow res = Resonance(rows, out limit, out bySlope);
             if (res != null)
             {
-                bool bySlope;
-                double limit = TrustLimit(valid, res, out bySlope);
                 w.Add("권선 자기공진 의심 (" + Fmt.FrequencyLabel(res.F) + "에서 μ′ 음수 또는 θ 부호 바뀜) - 신뢰 구간은 대략 "
                     + RoughFreq(limit) + " 이하" + (bySlope ? " (공진 앞에서 μ′가 5% 넘게 오르기 전)" : " (공진 주파수의 절반으로 어림)")
                     + ", 더 높은 주파수는 턴 수를 줄여 재측정 권장");
@@ -294,7 +328,7 @@ namespace LcrLogger
             area.AxisX.Minimum = 1e3;
             area.AxisX.Maximum = 8e6;
             area.AxisX.Title = "주파수 [Hz]";
-            area.AxisX.LabelStyle.Format = "#,0";
+            area.AxisX.LabelStyle.Format = "SI";   // 1k·10k·1M (FormatNumber에서 바꿈)
             area.AxisY.Title = "μ′";
             area.AxisY2.Enabled = Charting.AxisEnabled.True;
             area.AxisY2.Title = "μ″";
@@ -307,22 +341,58 @@ namespace LcrLogger
                 a.MajorGrid.LineColor = Theme.Separator;
                 a.LineColor = Theme.Secondary;
             }
+            // 가로로 끌면 확대, 더블클릭하면 원래대로 (Interval 0: 로그축에서 10배 단위로 끊기지 않게)
+            // MS Chart ScaleView 확대는 로그축에서 그리기 오류(Decimal 넘침)가 나서 축 범위를 직접 바꿈
+            area.CursorX.IsUserSelectionEnabled = true;
+            area.CursorX.Interval = 0;
+            area.CursorX.LineColor = Color.Transparent;
+            area.CursorX.SelectionColor = Color.FromArgb(70, Theme.Accent);
+            chart.SelectionRangeChanged += (o, e) => ZoomTo(area, e.NewSelectionStart, e.NewSelectionEnd);
+            chart.MouseDoubleClick += (o, e) => ZoomReset(chart);
+            chart.FormatNumber += (o, e) => { if (e.Format == "SI") e.LocalizedValue = Fmt.Si(e.Value); };
             chart.ChartAreas.Add(area);
             chart.Legends.Add(new Charting.Legend { Docking = Charting.Docking.Top, Alignment = StringAlignment.Center, Font = new Font(Theme.FontName, 9F), BackColor = Theme.Card });
             chart.Titles.Add(new Charting.Title { Font = new Font(Theme.FontName, 10F, FontStyle.Bold), ForeColor = Theme.Text });
-            chart.Series.Add(new Charting.Series("μ′ (왼쪽 축, 파란 선)") { ChartType = Charting.SeriesChartType.Line, Color = Theme.Accent, BorderWidth = 2 });
+            chart.Series.Add(new Charting.Series("μ′ (왼쪽 축, 파란 선)")
+            {
+                ChartType = Charting.SeriesChartType.Line, Color = Theme.Accent, BorderWidth = 2, ToolTip = "#VALX{SI}Hz\nμ′ = #VALY{G5}"
+            });
             chart.Series.Add(new Charting.Series("μ″ (오른쪽 축, 주황 ◆ 선)")
             {
-                ChartType = Charting.SeriesChartType.Line, Color = Color.FromArgb(230, 81, 0), BorderWidth = 2,
+                ChartType = Charting.SeriesChartType.Line, Color = Color.FromArgb(230, 81, 0), BorderWidth = 2, ToolTip = "#VALX{SI}Hz\nμ″ = #VALY{G5}",
                 MarkerStyle = Charting.MarkerStyle.Diamond, MarkerSize = 8, YAxisType = Charting.AxisType.Secondary
             });
             return chart;
+        }
+
+        // 원래 범위는 area.Tag에 두고 축 범위를 고른 범위로. a, b는 커서 위치(로그축이면 log10 값)
+        public static void ZoomTo(Charting.ChartArea area, double a, double b)
+        {
+            area.CursorX.SetSelectionPosition(double.NaN, double.NaN);
+            if (double.IsNaN(a) || double.IsNaN(b) || a == b) return;
+            Charting.Axis x = area.AxisX;
+            if (x.IsLogarithmic) { a = Math.Pow(10, a); b = Math.Pow(10, b); }
+            if (area.Tag == null) area.Tag = new[] { x.Minimum, x.Maximum };
+            x.Minimum = Math.Min(a, b);
+            x.Maximum = Math.Max(a, b);
+        }
+
+        public static void ZoomReset(Charting.Chart chart)
+        {
+            Charting.ChartArea area = chart.ChartAreas[0];
+            var full = area.Tag as double[];
+            area.Tag = null;
+            if (full == null) return;
+            area.AxisX.Minimum = full[0];
+            area.AxisX.Maximum = full[1];
         }
 
         // 가로축은 측정 범위로 고정 (자동이면 로그축이 1 Hz부터 잡힘)
         public static void ClearChart(Charting.Chart chart, string title, double start, double stop)
         {
             chart.Titles[0].Text = title;
+            chart.ChartAreas[0].Tag = null;
+            chart.ChartAreas[0].AxisX.StripLines.Clear();
             chart.ChartAreas[0].AxisX.Minimum = start;
             chart.ChartAreas[0].AxisX.Maximum = stop;
             chart.ChartAreas[0].AxisX.IsLogarithmic = false;

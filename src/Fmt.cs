@@ -108,6 +108,15 @@ namespace LcrLogger
             return hz.ToString("G6", CultureInfo.InvariantCulture) + "Hz";
         }
 
+        // 그래프 축 글자: 1k·10k·1M
+        public static string Si(double v)
+        {
+            double a = Math.Abs(v);
+            if (a >= 1e6) return (v / 1e6).ToString("G4", CultureInfo.InvariantCulture) + "M";
+            if (a >= 1e3) return (v / 1e3).ToString("G4", CultureInfo.InvariantCulture) + "k";
+            return v.ToString("G4", CultureInfo.InvariantCulture);
+        }
+
         public static bool TryParse(string token, out double value)
         {
             return double.TryParse(token, NumberStyles.Float, CultureInfo.InvariantCulture, out value);

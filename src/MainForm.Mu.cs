@@ -305,6 +305,7 @@ namespace LcrLogger
                     row.Warn = Permeability.LevelWarning(s.Cond.Level, s.Cond.LevelValue, row.V, row.I);
                     muRows.Add(row);
                     Permeability.AddPoint(muChart, row);
+                    Permeability.MarkTrust(muChart, muRows);
                     muProgress.Value = i + 1;
                     List<string> warns = Permeability.Warnings(muRows, s.Cond);
                     foreach (string w in warns)
@@ -338,6 +339,7 @@ namespace LcrLogger
                     string name = Permeability.FileStem(s.Name, s.N, started), stem = Path.Combine(txtFolder.Text, name);
                     for (int k = 2; File.Exists(stem + ".csv") || File.Exists(stem + ".png"); k++) stem = Path.Combine(txtFolder.Text, name + "_" + k);
                     File.WriteAllLines(stem + ".csv", Permeability.CsvLines(muInfo, muRows), new UTF8Encoding(true));
+                    Permeability.ZoomReset(muChart);   // 자동 저장 그림은 늘 전체 범위
                     Permeability.SavePng(muChart, stem + ".png");
                     muStem = stem;
                     lblMuFile.Text = Path.GetFileName(stem) + ".csv / .png  (" + status + ")";

@@ -123,7 +123,7 @@ namespace LcrLogger
             foreach (var pt in Fmt.TrendPoints(pars, freqLabels, row))
             {
                 Charting.Series s = trend.Series.FindByName(pt.Key);
-                if (s == null) trend.Series.Add(s = new Charting.Series(pt.Key) { ChartType = Charting.SeriesChartType.Line, BorderWidth = 2, MarkerStyle = Charting.MarkerStyle.Circle, MarkerSize = 5 });
+                if (s == null) trend.Series.Add(s = new Charting.Series(pt.Key) { ChartType = Charting.SeriesChartType.Line, BorderWidth = 2, MarkerStyle = Charting.MarkerStyle.Circle, MarkerSize = 5, ToolTip = "#VALX번째\n#SERIESNAME = #VALY{G6}" });
                 s.Points.AddXY(rows.Count, pt.Value);
             }
 
@@ -348,6 +348,7 @@ namespace LcrLogger
             grid.Columns[1].FillWeight = 110;
             grid.Columns[3].FillWeight = 150;   // 측정조건
             trend.Series.Clear();
+            Permeability.ZoomReset(trend);
             int shown = Math.Max(0, pars.FindIndex(Fmt.IsInductance));
             trend.ChartAreas[0].AxisY.Title = pars.Count > 0 ? Fmt.Header(pars[shown], unitIndex) : "";
         }
