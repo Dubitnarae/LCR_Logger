@@ -140,15 +140,17 @@ namespace LcrLogger
             {
                 double y = r.Vals[k];
                 if (r.X <= 0 || double.IsNaN(y) || double.IsInfinity(y)) continue;   // 그래프는 NaN을 그리지 못함 (CSV에는 빈칸)
-                string name = Fmt.DisplayName(pars[k]) + " · " + r.Rep + "회" + (k == 1 ? " (오른쪽, 점선)" : "");
+                string name = Fmt.DisplayName(pars[k]) + " · " + r.Rep + "회" + (k == 1 ? " (오른쪽, ◆ 표시)" : "");
                 Charting.Series s = chart.Series.FindByName(name);
                 if (s == null)
                 {
                     s = new Charting.Series(name) { ChartType = Charting.SeriesChartType.Line, BorderWidth = 2 };
-                    if (k == 1) { s.YAxisType = Charting.AxisType.Secondary; s.BorderDashStyle = Charting.ChartDashStyle.Dash; }
+                    // 점선은 점이 많으면 실선처럼 보여서 ◆ 표식으로 구분
+                    if (k == 1) { s.YAxisType = Charting.AxisType.Secondary; s.MarkerStyle = Charting.MarkerStyle.Diamond; s.MarkerSize = 8; }
                     chart.Series.Add(s);
                 }
                 s.Points.AddXY(r.X, y);
+                s.MarkerStep = Math.Max(1, s.Points.Count / 15);
             }
             if ((bool)chart.Tag) chart.ChartAreas[0].AxisX.IsLogarithmic = true;
         }

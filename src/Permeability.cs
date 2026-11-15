@@ -283,7 +283,8 @@ namespace LcrLogger
             return "MU_" + s + "_N" + n + "턴_" + time.ToString("yyyy-MM-dd_HH-mm-ss", CultureInfo.InvariantCulture);
         }
 
-        // 가로 주파수(로그), 왼쪽 μ′ 실선, 오른쪽 μ″ 점선
+        // 가로 주파수(로그), 왼쪽 μ′ 선, 오른쪽 μ″ ◆ 표시 선
+        // 점선은 MS Chart가 점 사이 토막마다 무늬를 새로 시작해 점이 많으면 실선이 되므로 ◆ 표식으로 구분
         public static Charting.Chart NewChart()
         {
             // 배치 도중 높이가 0이 되면 차트가 예외를 내므로 최소 크기를 줌
@@ -309,11 +310,11 @@ namespace LcrLogger
             chart.ChartAreas.Add(area);
             chart.Legends.Add(new Charting.Legend { Docking = Charting.Docking.Top, Alignment = StringAlignment.Center, Font = new Font(Theme.FontName, 9F), BackColor = Theme.Card });
             chart.Titles.Add(new Charting.Title { Font = new Font(Theme.FontName, 10F, FontStyle.Bold), ForeColor = Theme.Text });
-            chart.Series.Add(new Charting.Series("μ′ (왼쪽 축, 실선)") { ChartType = Charting.SeriesChartType.Line, Color = Theme.Accent, BorderWidth = 2 });
-            chart.Series.Add(new Charting.Series("μ″ (오른쪽 축, 점선)")
+            chart.Series.Add(new Charting.Series("μ′ (왼쪽 축, 파란 선)") { ChartType = Charting.SeriesChartType.Line, Color = Theme.Accent, BorderWidth = 2 });
+            chart.Series.Add(new Charting.Series("μ″ (오른쪽 축, 주황 ◆ 선)")
             {
                 ChartType = Charting.SeriesChartType.Line, Color = Color.FromArgb(230, 81, 0), BorderWidth = 2,
-                BorderDashStyle = Charting.ChartDashStyle.Dash, YAxisType = Charting.AxisType.Secondary
+                MarkerStyle = Charting.MarkerStyle.Diamond, MarkerSize = 8, YAxisType = Charting.AxisType.Secondary
             });
             return chart;
         }
@@ -350,6 +351,7 @@ namespace LcrLogger
             if (r.F <= 0 || !Finite(r.Mu1) || !Finite(r.Mu2)) return;   // 그래프는 NaN을 그리지 못함 (CSV에는 빈칸으로 남음)
             chart.Series[0].Points.AddXY(r.F, r.Mu1);
             chart.Series[1].Points.AddXY(r.F, r.Mu2);
+            chart.Series[1].MarkerStep = Math.Max(1, chart.Series[1].Points.Count / 15);   // 점이 많아도 ◆는 15개 안팎
             chart.ChartAreas[0].AxisX.IsLogarithmic = true;
         }
     }
