@@ -97,7 +97,9 @@ namespace LcrLogger
             btnMuPng = Btn("그래프 PNG 저장", OnMuSavePng);
             lblMuFile = new Label { AutoSize = true, Margin = new Padding(8, 9, 3, 3), ForeColor = Theme.Secondary };
             lblMuWarn = new Label { AutoSize = true, Margin = new Padding(10, 6, 3, 3), ForeColor = Theme.Red, Font = new Font(Theme.FontName, 9F, FontStyle.Bold) };
-            Add(result, btnMuCsv, btnMuPng, lblMuFile, lblMuWarn);
+            chkMuTrust = new Switch { Text = "신뢰 구간 밖 회색 표시", Checked = true, Margin = new Padding(16, 4, 3, 3) };
+            chkMuTrust.CheckedChanged += delegate { ShowTrust(); };
+            Add(result, btnMuCsv, btnMuPng, chkMuTrust, lblMuFile, lblMuWarn);
             result.SetFlowBreak(lblMuFile, true);
             lay.Controls.Add(result.Parent);
 
@@ -112,7 +114,7 @@ namespace LcrLogger
                 { "MuName", txtMuName }, { "MuTurns", numTurns }, { "MuOD", txtOD }, { "MuID", txtID }, { "MuH", txtH },
                 { "MuDirect", chkDirect }, { "MuLe", txtLe }, { "MuAe", txtAe }, { "MuRw", txtRw },
                 { "MuStart", txtMuStart }, { "MuStop", txtMuStop }, { "MuPoints", numPoints }, { "MuSpacing", cbSpacing },
-                { "MuLevel", cbMuLevel }, { "MuLevelValue", txtMuLevel }, { "MuSpeed", cbMuSpeed }, { "MuAvg", numAvg }, { "MuDelay", numDelay }
+                { "MuLevel", cbMuLevel }, { "MuLevelValue", txtMuLevel }, { "MuSpeed", cbMuSpeed }, { "MuAvg", numAvg }, { "MuDelay", numDelay }, { "MuTrust", chkMuTrust }
             };
             UpdateGeometry();
             return lay;
@@ -305,7 +307,7 @@ namespace LcrLogger
                     row.Warn = Permeability.LevelWarning(s.Cond.Level, s.Cond.LevelValue, row.V, row.I);
                     muRows.Add(row);
                     Permeability.AddPoint(muChart, row);
-                    Permeability.MarkTrust(muChart, muRows);
+                    ShowTrust();
                     muProgress.Value = i + 1;
                     List<string> warns = Permeability.Warnings(muRows, s.Cond);
                     foreach (string w in warns)
@@ -337,13 +339,18 @@ namespace LcrLogger
                 {
                     Directory.CreateDirectory(txtFolder.Text);
                     string name = Permeability.FileStem(s.Name, s.N, started), stem = Path.Combine(txtFolder.Text, name);
-                    for (int k = 2; File.Exists(stem + ".csv") || File.Exists(stem + ".png"); k++) stem = Path.Combine(txtFolder.Text, name + "_" + k);
+                    for (int k = 2; File.Exists(stem + ".csv") || File.Exists(stem + ".png") || File.Exists(stem + NoTrustPng); k++) stem = Path.Combine(txtFolder.Text, name + "_" + k);
                     File.WriteAllLines(stem + ".csv", Permeability.CsvLines(muInfo, muRows), new UTF8Encoding(true));
                     Permeability.ZoomReset(muChart);   // 자동 저장 그림은 늘 전체 범위
+                    // 회색 띠 있는 그림·없는 그림 두 장 (화면 스위치와 상관없이)
+                    Permeability.MarkTrust(muChart, muRows);
                     Permeability.SavePng(muChart, stem + ".png");
+                    muChart.ChartAreas[0].AxisX.StripLines.Clear();
+                    Permeability.SavePng(muChart, stem + NoTrustPng);
+                    ShowTrust();
                     muStem = stem;
-                    lblMuFile.Text = Path.GetFileName(stem) + ".csv / .png  (" + status + ")";
-                    Log("복소 투자율 저장: " + stem + ".csv, .png");
+                    lblMuFile.Text = Path.GetFileName(stem) + ".csv / .png 2장  (" + status + ")";
+                    Log("복소 투자율 저장: " + stem + ".csv, .png, " + NoTrustPng);
                 }
                 catch (Exception ex)
                 {
@@ -430,6 +437,14 @@ namespace LcrLogger
                 }
                 catch (Exception ex) { MessageBox.Show(this, "저장하지 못했습니다. 파일이 열려 있는지 확인하세요.\n\n" + ex.Message, "저장", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
             }
+        }
+
+        const string NoTrustPng = "_회색없음.png";
+
+        void ShowTrust()
+        {
+            if (chkMuTrust.Checked) Permeability.MarkTrust(muChart, muRows);
+            else muChart.ChartAreas[0].AxisX.StripLines.Clear();
         }
 
         void OnMuSavePng(object sender, EventArgs e)

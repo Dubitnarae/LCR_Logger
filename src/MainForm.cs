@@ -89,7 +89,7 @@ namespace LcrLogger
         // 복소 투자율 탭
         TextBox txtMuName, txtOD, txtID, txtH, txtLe, txtAe, txtRw, txtMuStart, txtMuStop, txtMuLevel;
         NumericUpDown numTurns, numPoints, numAvg, numDelay;
-        CheckBox chkDirect;
+        CheckBox chkDirect, chkMuTrust;
         ComboBox cbSpacing, cbMuLevel, cbMuSpeed;
         Button btnDcr, btnMuStart, btnMuStop, btnMuCsv, btnMuPng;
         ProgressBar muProgress;
