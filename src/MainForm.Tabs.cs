@@ -144,6 +144,7 @@ namespace LcrLogger
             UpdateUi();
             DateTime started = DateTime.Now;
             string status = "완료", meterCond = "";
+            List<KeyValuePair<string, string>> snap = null;
             Exception error = null;
             Log("스윕 측정 시작: " + Sweep.Items[item] + " " + pts.Count + "점 × " + reps + "회");
             try
@@ -156,6 +157,7 @@ namespace LcrLogger
                 swPars = await Io(() => Enumerable.Range(1, 4).Select(i => m.Query(":PARameter" + i + "?").Trim().ToUpperInvariant()).Where(p => p.Length > 0 && p != "OFF").ToList());
                 if (swPars.Count == 0) throw new InvalidOperationException("계측기의 PAR1~PAR4가 모두 OFF입니다. [계측기 설정] 탭에서 측정할 파라미터를 고르세요.");
                 meterCond = await Io(() => MeasCond.Summary(m));
+                snap = await Io(() => MeasCond.Snapshot(m, snapSilent));
                 MeasCond freqLevel = Permeability.LevelOf(meterCond);   // 주파수 스윕은 계측기에 설정된 레벨과 비교
                 var swWarned = new List<string>();
                 Sweep.ClearChart(swChart, (name.Length > 0 ? name + "  ·  " : "") + Sweep.Items[item] + " 스윕", item, swPars, logX, pts.Min(), pts.Max());
@@ -214,6 +216,7 @@ namespace LcrLogger
                     kv("상태", status),
                     kv("경고", swRows.Count(r => r.Warn.Length > 0) == 0 ? "없음" : "측정 신호가 설정과 다른 점 " + swRows.Count(r => r.Warn.Length > 0) + "개 (레벨 경고 열 참고)")
                 };
+                swInfo.InsertRange(swInfo.FindIndex(x => x.Key == "상태"), await SnapInfo(m, snap, error == null));
                 try
                 {
                     Directory.CreateDirectory(txtFolder.Text);
@@ -393,6 +396,7 @@ namespace LcrLogger
             }
             finally
             {
+                snapTime = DateTime.MinValue;   // 다음 측정 때 계측기 설정을 다시 읽어 바뀌었으면 새 CSV 파일로
                 busy = false;
                 UpdateUi();
             }

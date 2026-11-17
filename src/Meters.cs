@@ -514,6 +514,54 @@ namespace LcrLogger
             if (bias == "ON") bias += " " + m.Query(":DCBias:LEVel?").Trim() + "V";
             return level + " / SPEED " + m.Query(":SPEEd?").Trim().ToUpperInvariant() + " / DC바이어스 " + bias;
         }
+
+        // CSV 위쪽 "항목,값"에 남길 계측기 설정 (이름, 명령). 레벨·SPEED·바이어스는 줄마다 '측정조건' 열에 따로 남음
+        // shortcut: :CORR:OPEN?/:CORR:SHOR?/:CORR:LOAD? 는 공식 앱에 없는 철자라 실기 미확인 — 응답 없으면 "응답 없음"으로 적음, 실기 결과 보고 고치기
+        static readonly string[,] SnapshotItems =
+        {
+            { "케이블 길이 [m]", ":CORR:CABL" }, { "OPEN 보정", ":CORR:OPEN" }, { "SHORT 보정", ":CORR:SHOR" }, { "LOAD 보정", ":CORR:LOAD" },
+            { "자동 레인지", ":RANG:AUTO" }, { "레인지", ":RANG" }, { "LOW Z 모드", ":RANG:LOWZ" }, { "평균 횟수", ":AVER" },
+            { "측정 주파수 [Hz]", ":FREQ" }, { "트리거", ":TRIG" }, { "트리거 지연 [s]", ":TRIG:DEL" },
+            { "리밋", ":LIM" }, { "리밋 전압 [V]", ":LIM:VOLT" }, { "리밋 전류 [A]", ":LIM:CURR" }, { "트리거 동기 출력", ":SSO" },
+            { "Rdc 자동 레인지", ":DCR:RANG:AUTO" }, { "Rdc 레인지", ":DCR:RANG" }, { "전원 주파수 [Hz]", ":DCR:LFR" }
+        };
+
+        // 계측기 설정을 읽어 (이름, 값) 목록으로. 응답 없는(시간 초과) 명령은 silent에 넣어 다음부터 묻지 않음
+        public static List<KeyValuePair<string, string>> Snapshot(IMeter m, HashSet<string> silent)
+        {
+            var list = new List<KeyValuePair<string, string>>();
+            var timed = m as ITimed;
+            int old = timed != null ? timed.TimeoutMs : 0;
+            if (timed != null) timed.TimeoutMs = 2000;   // 모르는 명령에는 계측기가 답하지 않으므로 오래 기다리지 않음
+            try
+            {
+                for (int i = 0; i < SnapshotItems.GetLength(0); i++)
+                {
+                    string cmd = SnapshotItems[i, 1], v = "응답 없음";
+                    if (!silent.Contains(cmd))
+                    {
+                        try
+                        {
+                            string r = m.Query(cmd + "?").Trim();
+                            if (r.Length > 0) v = r;
+                        }
+                        catch (TimeoutException) { silent.Add(cmd); }
+                    }
+                    // 레인지 번호는 [계측기 설정] 탭과 같은 이름으로 (예: "4" → "4 (100Ω)")
+                    SettingItem item = MeterSettings.Items.FirstOrDefault(s => s.Cmd == cmd);
+                    string named = item == null || item.Choices == null ? null : item.Choices.FirstOrDefault(c => c.StartsWith(v + " ("));
+                    list.Add(new KeyValuePair<string, string>(SnapshotItems[i, 0], named ?? v));
+                }
+            }
+            finally { if (timed != null) timed.TimeoutMs = old; }
+            return list;
+        }
+
+        // 두 설정 목록에서 값이 달라진 항목 (예: "케이블 길이 [m] 0→1")
+        public static List<string> Changes(List<KeyValuePair<string, string>> a, List<KeyValuePair<string, string>> b)
+        {
+            return a.Zip(b, (x, y) => x.Value == y.Value ? null : x.Key + " " + x.Value + "→" + y.Value).Where(s => s != null).ToList();
+        }
     }
 
     // 계측기 없이 화면/저장 기능을 확인하기 위한 가상 계측기
@@ -583,7 +631,7 @@ namespace LcrLogger
         {
             { ":LIM", "OFF" }, { ":LIM:VOLT", "5.000" }, { ":LIM:CURR", "50.00E-03" }, { ":RANG:AUTO", "ON" }, { ":RANG", "4" }, { ":DCR:RANG:AUTO", "ON" }, { ":DCR:RANG", "2" },
             { ":RANG:LOWZ", "OFF" }, { ":TRIG:DEL", "0.0000" }, { ":SSO", "OFF" }, { ":SSO:WAIT", "0.0010" },
-            { ":DCR:DCD", "0.0000" }, { ":DCR:ADJD", "0.0030" }, { ":DCR:LFR", "60" }
+            { ":DCR:DCD", "0.0000" }, { ":DCR:ADJD", "0.0030" }, { ":DCR:LFR", "60" }, { ":CORR:CABL", "1" }
         };
 
         // 화면 캡처 흉내: 480×272 BMP

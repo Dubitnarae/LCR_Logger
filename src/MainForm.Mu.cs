@@ -284,6 +284,7 @@ namespace LcrLogger
             UpdateUi();
             DateTime started = DateTime.Now;
             string status = "완료", meterCond = "";
+            List<KeyValuePair<string, string>> snap = null;
             Exception error = null;
             var shown = new List<string>();
             Log("복소 투자율 측정 시작: " + Fmt.FrequencyLabel(s.Start) + " ~ " + Fmt.FrequencyLabel(s.Stop) + ", " + list.Count + "점, "
@@ -297,6 +298,7 @@ namespace LcrLogger
                 finally { foreach (string l in lines) Log(l); }
                 PersistPending();   // 측정 중 프로그램이 죽어도 다음 연결 때 되돌릴 수 있도록
                 meterCond = await Io(() => MeasCond.Summary(m));
+                snap = await Io(() => MeasCond.Snapshot(m, snapSilent));
                 SetTimeout(m, 60000);   // 저주파·SLOW2·평균이 많으면 한 점에 수 초 이상 걸림 (공식 앱은 무제한 대기)
                 for (int i = 0; i < list.Count && !muStopRequested; i++)
                 {
@@ -335,6 +337,7 @@ namespace LcrLogger
             if (muRows.Count > 0)
             {
                 muInfo = MuInfo(s, started, status, meterCond);
+                muInfo.InsertRange(muInfo.FindIndex(kv => kv.Key == "상태"), await SnapInfo(m, snap, error == null));
                 try
                 {
                     Directory.CreateDirectory(txtFolder.Text);
@@ -375,6 +378,26 @@ namespace LcrLogger
             }
             else SystemSounds.Asterisk.Play();
             UpdateUi();
+        }
+
+        // 투자율·스윕 CSV 위쪽에 넣을 계측기 설정: 시작 때 값 + 끝날 때 다시 읽어 달라진 항목.
+        // 주파수는 측정하면서 바꾸므로 뺌. 측정이 오류로 끝났으면(연결 끊김 등) 끝 확인은 건너뜀
+        async Task<List<KeyValuePair<string, string>>> SnapInfo(IMeter m, List<KeyValuePair<string, string>> start, bool ended)
+        {
+            const string freqItem = "측정 주파수 [Hz]";
+            var info = new List<KeyValuePair<string, string>>();
+            if (start == null) return info;
+            info.AddRange(start.Where(kv => kv.Key != freqItem));
+            if (!ended) return info;
+            try
+            {
+                var end = await Io(() => MeasCond.Snapshot(m, snapSilent));
+                List<string> changed = MeasCond.Changes(start, end).Where(c => !c.StartsWith(freqItem)).ToList();
+                info.Add(new KeyValuePair<string, string>("측정 중 바뀐 설정", changed.Count == 0 ? "없음" : string.Join(", ", changed)));
+                if (changed.Count > 0) Log("※ 측정하는 동안 계측기 설정이 바뀌었습니다: " + string.Join(", ", changed));
+            }
+            catch (Exception ex) { Log("측정 후 계측기 설정 확인 실패: " + ex.Message); }
+            return info;
         }
 
         static void SetTimeout(IMeter m, int ms)

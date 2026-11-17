@@ -118,6 +118,22 @@ namespace LcrLogger
                 Check(MeasCond.Summary(m) == "CC 20mA / SPEED MEDIUM / DC바이어스 ON 1.50V", "측정 조건 요약 (CC, 바이어스)");
                 MeasCond.Restore(m, MeasCond.Deserialize(stored));
                 output.AppendLine("측정 조건 요약: " + summary);
+
+                // CSV 위쪽 계측기 설정: 케이블·레인지 이름, 모르는 명령은 "응답 없음", 바뀐 항목 찾기
+                var silent = new HashSet<string>();
+                var snap = MeasCond.Snapshot(m, silent);
+                Func<string, string> sv = k => snap.First(kv => kv.Key == k).Value;
+                Check(sv("케이블 길이 [m]") == "1" && sv("레인지") == "4 (100Ω)" && sv("OPEN 보정") == "응답 없음" && sv("트리거") == "INT", "계측기 설정 읽기 " + string.Join(" / ", snap.Select(kv => kv.Key + "=" + kv.Value)));
+                Check(MeasCond.Changes(snap, MeasCond.Snapshot(m, silent)).Count == 0, "계측기 설정 그대로면 바뀐 항목 없음");
+                m.Send(":CORR:CABL 2");
+                List<string> snapChanged = MeasCond.Changes(snap, MeasCond.Snapshot(m, silent));
+                m.Send(":CORR:CABL 1");
+                Check(snapChanged.Count == 1 && snapChanged[0] == "케이블 길이 [m] 1→2", "계측기 설정 바뀐 항목 " + string.Join(", ", snapChanged));
+                var infoWriter = new CsvWriter();
+                infoWriter.Start(folder, Fmt.HeaderFields(pars, 2, new List<string>()), snap);
+                string[] infoLines = File.ReadAllLines(infoWriter.FilePath, Encoding.UTF8);
+                Check(infoLines[0] == "케이블 길이 [m],1" && infoLines[snap.Count] == "" && infoLines[snap.Count + 1].StartsWith("No,"), "CSV 위쪽 계측기 설정 줄");
+                output.AppendLine("계측기 설정: " + string.Join(" / ", snap.Select(kv => kv.Key + "=" + kv.Value)));
                 var multiWriter = new CsvWriter();
                 multiWriter.Start(folder, Fmt.HeaderFields(pars, 2, labels));
                 Check(multiWriter.FilePath != writer.FilePath, "같은 초에 만든 파일도 덮어쓰지 않음");

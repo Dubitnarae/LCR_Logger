@@ -30,6 +30,9 @@ namespace LcrLogger
         ComboBox cbPreset;                          // 측정 조건 프리셋 (이름을 직접 입력해 저장)
         Button btnApplyCond, btnPresetSave, btnPresetDelete;
         string condText = "";                       // CSV 측정조건 열에 남길 계측기의 실제 조건
+        List<KeyValuePair<string, string>> meterSnap, csvSnap;   // 최근에 읽은 계측기 설정 / 지금 CSV 파일 위쪽에 적은 설정
+        DateTime snapTime = DateTime.MinValue;      // meterSnap을 읽은 시각 (30초 넘으면 측정 전에 다시 읽음)
+        readonly HashSet<string> snapSilent = new HashSet<string>();   // 응답 없던 설정 명령 (다시 묻지 않음)
         string currentIdn;                          // 연결한 계측기 *IDN? (복원 못 한 설정을 같은 계측기에만 되돌리기 위함)
         string updateAttemptDay;                    // 오늘 업데이트 확인을 시도했는지 (실패해도 1초마다 다시 시도하지 않도록)
         const string PresetPrefix = "Preset.";

@@ -34,6 +34,14 @@ namespace LcrLogger
             UpdateUi();
             try
             {
+                // 계측기 설정(케이블·보정·레인지 등)은 30초마다 또는 새 파일 전에 다시 읽음 (매번 읽으면 측정이 느려짐)
+                if (csv.FilePath == null || DateTime.Now - snapTime > TimeSpan.FromSeconds(30))
+                {
+                    meterSnap = await Io(() => MeasCond.Snapshot(m, snapSilent));
+                    snapTime = DateTime.Now;
+                    List<string> changed = csvSnap == null || csv.FilePath == null ? new List<string>() : MeasCond.Changes(csvSnap, meterSnap);
+                    if (changed.Count > 0) StartNewTable("계측기 설정이 바뀌어 새 파일로 시작합니다: " + string.Join(", ", changed));
+                }
                 List<string> responses;
                 var monis = new List<string>();
                 if (list.Count == 0)
@@ -165,7 +173,8 @@ namespace LcrLogger
             {
                 if (csv.FilePath == null)
                 {
-                    csv.Start(txtFolder.Text, Fmt.HeaderFields(pars, unitIndex, freqLabels));
+                    csvSnap = meterSnap;
+                    csv.Start(txtFolder.Text, Fmt.HeaderFields(pars, unitIndex, freqLabels), CsvInfo());
                     Log("저장 파일: " + csv.FilePath);
                 }
                 csv.Append(row);
@@ -353,6 +362,14 @@ namespace LcrLogger
             trend.ChartAreas[0].AxisY.Title = pars.Count > 0 ? Fmt.Header(pars[shown], unitIndex) : "";
         }
 
+        // 기본 측정 CSV 위쪽 "항목,값": 계측기와 이 파일을 시작할 때 읽은 설정
+        List<KeyValuePair<string, string>> CsvInfo()
+        {
+            var info = new List<KeyValuePair<string, string>> { new KeyValuePair<string, string>("계측기", currentIdn ?? "") };
+            if (csvSnap != null) info.AddRange(csvSnap);
+            return info;
+        }
+
         void StartNewTable(string message)
         {
             rows.Clear();
@@ -414,7 +431,8 @@ namespace LcrLogger
             })
             {
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
-                var lines = new List<string> { Fmt.CsvLine(Fmt.HeaderFields(pars, unitIndex, freqLabels)) };
+                var lines = Fmt.InfoLines(CsvInfo());
+                lines.Add(Fmt.CsvLine(Fmt.HeaderFields(pars, unitIndex, freqLabels)));
                 lines.AddRange(rows.Select(r => Fmt.CsvLine(r)));
                 File.WriteAllText(dlg.FileName, string.Join("\r\n", lines) + "\r\n", new UTF8Encoding(true));
                 Log("저장 완료: " + dlg.FileName);

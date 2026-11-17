@@ -276,6 +276,7 @@ namespace LcrLogger
             try { condText = await Io(() => MeasCond.Summary(m)); }
             catch (TimeoutException) { condText = "확인 불가"; }
             Log("측정 조건(계측기): " + condText);
+            snapTime = DateTime.MinValue;   // 계측기 설정(CSV 위쪽)도 다음 측정 때 다시 읽음
         }
 
         // ---------------- 복원 못 한 측정 조건 (비정상 종료 대비) ----------------

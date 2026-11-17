@@ -195,6 +195,13 @@ namespace LcrLogger
                 f.IndexOfAny(new[] { ',', '"', '\r', '\n' }) >= 0 ? "\"" + f.Replace("\"", "\"\"") + "\"" : f));
         }
 
+        // CSV 위쪽 "항목,값" 줄들과 빈 줄 (info가 비면 아무것도 없음)
+        public static List<string> InfoLines(List<KeyValuePair<string, string>> info)
+        {
+            if (info == null || info.Count == 0) return new List<string>();
+            return info.Select(kv => CsvLine(new[] { kv.Key, kv.Value })).Concat(new[] { "" }).ToList();
+        }
+
         // frequencyLabels가 비어 있으면 단일 측정, 있으면 주파수마다 파라미터 열을 반복
         public static List<string> HeaderFields(List<string> pars, int inductanceUnit, List<string> frequencyLabels)
         {
@@ -261,7 +268,8 @@ namespace LcrLogger
         public string FilePath { get; private set; }
         public int PendingCount { get { return pending.Count; } }
 
-        public void Start(string folder, List<string> header)
+        // info가 있으면 맨 위에 "항목,값" 줄과 빈 줄을 쓰고 그 아래에 표 (투자율·스윕 CSV와 같은 모양)
+        public void Start(string folder, List<string> header, List<KeyValuePair<string, string>> info = null)
         {
             Directory.CreateDirectory(folder);
             string stem = Path.Combine(folder, "LCR_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss", CultureInfo.InvariantCulture));
@@ -269,7 +277,7 @@ namespace LcrLogger
             for (int n = 2; File.Exists(FilePath); n++)
                 FilePath = stem + "_" + n + ".csv";
             pending.Clear();
-            File.WriteAllText(FilePath, Fmt.CsvLine(header) + "\r\n", new UTF8Encoding(true));
+            File.WriteAllText(FilePath, string.Join("\r\n", Fmt.InfoLines(info).Concat(new[] { Fmt.CsvLine(header) })) + "\r\n", new UTF8Encoding(true));
         }
 
         public void Reset()
