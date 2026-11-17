@@ -196,6 +196,7 @@ namespace LcrLogger
             outer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             outer.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             outer.RowStyles.Add(new RowStyle(SizeType.Absolute, 96));
+            outer.RowStyles.Add(new RowStyle(SizeType.AutoSize));   // 맨 아래: 업데이트·정보 (어느 탭에서나 보이게)
             Controls.Add(outer);
 
             var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(0, 8, 4, 0), BackColor = Theme.Bg };
@@ -470,11 +471,7 @@ namespace LcrLogger
                 if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; OnSendCommand(s, e); }
             };
             btnSend = Btn("명령 전송", OnSendCommand);
-            chkAutoUpdate = new Switch { Text = "하루 한 번 업데이트 확인", Margin = new Padding(20, 4, 3, 3) };
-            btnUpdate = Btn("업데이트 확인", async delegate { await CheckUpdate(false); });
-            var btnAbout = Btn("정보", OnAbout);
-            var lblDev = new Label { AutoSize = true, Margin = new Padding(12, 9, 3, 3), ForeColor = Theme.Secondary, Text = "개발자: " + Updater.Developer };
-            cmdRow.Controls.AddRange(new Control[] { Lbl("직접 명령(예: :FREQ?)"), txtCmd, btnSend, chkAutoUpdate, btnUpdate, btnAbout, lblDev });
+            cmdRow.Controls.AddRange(new Control[] { Lbl("직접 명령(예: :FREQ?)"), txtCmd, btnSend });
             layout.Controls.Add(cmdRow);
 
             txtLog = new TextBox
@@ -491,6 +488,15 @@ namespace LcrLogger
             var logCard = new Card(null, false) { Padding = new Padding(12, 8, 6, 8), Margin = new Padding(0) };
             logCard.Controls.Add(txtLog);
             outer.Controls.Add(logCard);
+
+            // 창 맨 아래 오른쪽: 업데이트·정보·개발자 (탭과 상관없이 늘 보임, 오른쪽부터 채움)
+            chkAutoUpdate = new Switch { Text = "하루 한 번 업데이트 확인", Margin = new Padding(3, 4, 12, 3) };
+            btnUpdate = Btn("업데이트 확인", async delegate { await CheckUpdate(false); });
+            var btnAbout = Btn("정보", OnAbout);
+            var lblDev = new Label { AutoSize = true, Margin = new Padding(12, 9, 3, 3), ForeColor = Theme.Secondary, Text = "개발자: " + Updater.Developer };
+            var footer = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false, FlowDirection = FlowDirection.RightToLeft, BackColor = Theme.Bg, Margin = new Padding(0, 6, 0, 0) };
+            footer.Controls.AddRange(new Control[] { lblDev, btnAbout, btnUpdate, chkAutoUpdate });
+            outer.Controls.Add(footer);
 
             StyleInputs(outer);
             OnIfChanged();   // FieldBox로 감싼 뒤에 숨겨야 빈 테두리가 남지 않음
