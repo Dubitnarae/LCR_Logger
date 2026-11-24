@@ -428,6 +428,7 @@ namespace LcrLogger
                 SelectToken(cbPar[i], d, "P" + (i + 2));
             foreach (string key in CondExtraKeys)
                 SetExtra(key, d.TryGetValue("X" + key, out v) ? v : "");   // 1.22 이전 프리셋에는 없음 → 변경 안 함
+            if (CondExtraKeys.Any(k => GetExtra(k).Length > 0)) chkCondMore.Checked = true;
             Log("프리셋 불러옴: " + name + (meter != null ? " - [연결 중 적용]을 눌러야 계측기에 반영됩니다." : ""));
         }
 

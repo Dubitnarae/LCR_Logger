@@ -34,7 +34,7 @@ namespace LcrLogger
         FlowLayoutPanel BuildCoreCard()
         {
             var g = Group("코어 투자율 (측정할 때마다 인덕턴스로 μ′ 계산)");
-            chkCore = new Switch { Text = "사용", Margin = new Padding(3, 4, 8, 3) };
+            chkCore = new Switch { Text = "사용", Margin = new Padding(3, 3, 8, 2) };
             cbCore = new ComboBox { DropDownStyle = ComboBoxStyle.DropDown, Width = 150 };
             cbCore.SelectionChangeCommitted += delegate { LoadCore(cbCore.SelectedItem as string); };
             btnCoreSave = Btn("코어 저장", OnCoreSave);

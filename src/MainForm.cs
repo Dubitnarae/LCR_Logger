@@ -42,7 +42,8 @@ namespace LcrLogger
         static readonly string[] CondExtraKeys = { ":FREQ", ":RANG:AUTO", ":RANG", ":RANG:LOWZ", ":AVER", ":LIM", ":LIM:VOLT", ":LIM:CURR",
             ":TRIG:DEL", ":SSO", ":SSO:WAIT", ":DCR:DCD", ":DCR:ADJD", ":DCR:LFR" };
         readonly Dictionary<string, Control> condExtra = new Dictionary<string, Control>();
-        Switch chkRestoreCond;
+        Switch chkRestoreCond, chkCondMore;
+        readonly List<Control> condMoreRows = new List<Control>();   // 접었다 펴는 추가 항목의 이름표·설명 (입력 칸은 condExtra)
         MeasCond connectCond;                       // 연결할 때 적용한 측정 조건 (재연결 때 다시 보냄)
         Dictionary<string, string> savedCond;       // 바꾸기 전 계측기 값 (연결 해제할 때 복원)
         Button btnRefresh, btnConnect, btnMeasure, btnAuto, btnFolder, btnOpenFolder, btnNewFile, btnExport, btnClear, btnSend, btnUpdate;
@@ -191,7 +192,7 @@ namespace LcrLogger
         void BuildUi()
         {
             // 바깥: 연결 카드 / 탭(인덕턴스 기록, 복소 투자율) / 로그. 연결과 로그는 두 탭이 같이 씀
-            var outer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(14, 12, 14, 10), BackColor = Theme.Bg };
+            var outer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(12, 8, 12, 8), BackColor = Theme.Bg };
             outer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             outer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             outer.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -236,11 +237,11 @@ namespace LcrLogger
             cbBaud = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 80 };
             cbBaud.Items.AddRange(new object[] { "9600", "19200", "38400", "57600", "115200" });
             cbBaud.SelectedIndex = 0;
-            chkDemo = new Switch { Text = "데모 모드(계측기 없이 시험)", Margin = new Padding(12, 4, 3, 3) };
-            chkReconnect = new Switch { Text = "USB 자동 재연결", Margin = new Padding(12, 4, 3, 3) };
+            chkDemo = new Switch { Text = "데모 모드(계측기 없이 시험)", Margin = new Padding(12, 3, 3, 2) };
+            chkReconnect = new Switch { Text = "USB 자동 재연결", Margin = new Padding(12, 3, 3, 2) };
             btnConnect = Btn("연결", OnConnect, true);
             btnConnect.Width = 90;
-            lblModel = new Label { AutoSize = true, Margin = new Padding(8, 9, 3, 3), ForeColor = Theme.Secondary, Text = "연결 안 됨" };
+            lblModel = new Label { AutoSize = true, Margin = new Padding(8, 7, 3, 2), ForeColor = Theme.Secondary, Text = "연결 안 됨" };
             Add(conn, Lbl("연결 방식"), cbIf, lblPort, cbPort, btnRefresh, lblBaud, cbBaud, lblAddr, txtAddr, chkDemo, chkReconnect, btnConnect, lblModel);
             outer.Controls.Add(conn.Parent);
             outer.Controls.Add(tabs);
@@ -254,7 +255,7 @@ namespace LcrLogger
             txtMemo = new TextBox { Width = 150 };
             btnMeasure = Btn("측정 (Enter)", async delegate { await MeasureOnce(); }, true);
             btnMeasure.Width = 110;
-            chkTrg = new Switch { Text = "누를 때마다 새로 측정(계측기 EXT 트리거)", Margin = new Padding(12, 4, 3, 3) };
+            chkTrg = new Switch { Text = "누를 때마다 새로 측정(계측기 EXT 트리거)", Margin = new Padding(12, 3, 3, 2) };
             numInterval = new NumericUpDown { Width = 60, DecimalPlaces = 1, Minimum = 0.2M, Maximum = 3600, Value = 1, Increment = 0.5M };
             numCount = new NumericUpDown { Width = 60, Minimum = 0, Maximum = 100000, Value = 10 };
             btnAuto = Btn("연속 측정 시작", OnAuto);
@@ -267,7 +268,7 @@ namespace LcrLogger
 
             // 다중 주파수: LCR 모드에서 주파수를 바꿔 가며 한 번에 측정 (연속 측정 모드 대신)
             var multi = Group("다중 주파수 측정 (연결 전에 설정)");
-            chkMulti = new Switch { Text = "사용 - 측정 한 번에 아래 주파수를 차례로 측정해 한 행에 기록", Margin = new Padding(3, 4, 8, 3) };
+            chkMulti = new Switch { Text = "사용 - 측정 한 번에 아래 주파수를 차례로 측정해 한 행에 기록", Margin = new Padding(3, 3, 8, 2) };
             multi.Controls.Add(chkMulti);
             multi.SetFlowBreak(chkMulti, true);
             txtFreq = new TextBox[8];
@@ -308,7 +309,7 @@ namespace LcrLogger
             Add(cond, Lbl("측정 신호"), cbLevel, txtCv, lblLevelUnit, Lbl("SPEED"), cbSpeed, Lbl("DC 바이어스"), cbBias, txtBias, Lbl("V"), condHint);
             cond.SetFlowBreak(condHint, true);
             cbPar = new ComboBox[3];
-            var parRow = new List<Control> { Lbl("측정 파라미터   PAR1"), new Label { Text = "Ls (고정)", AutoSize = true, Margin = new Padding(3, 9, 6, 3), ForeColor = Theme.Text } };
+            var parRow = new List<Control> { Lbl("측정 파라미터   PAR1"), new Label { Text = "Ls (고정)", AutoSize = true, Margin = new Padding(3, 7, 6, 2), ForeColor = Theme.Text } };
             for (int i = 0; i < cbPar.Length; i++)
             {
                 cbPar[i] = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 100 };
@@ -321,6 +322,10 @@ namespace LcrLogger
             }
             Add(cond, parRow.ToArray());
             cond.SetFlowBreak(cbPar[cbPar.Length - 1], true);
+            chkCondMore = new Switch { Text = "그 밖의 항목 보기 (주파수·레인지·평균·리밋·트리거·Rdc 등)", Margin = new Padding(3, 3, 8, 2) };
+            chkCondMore.CheckedChanged += delegate { ShowCondMore(); };
+            cond.Controls.Add(chkCondMore);
+            cond.SetFlowBreak(chkCondMore, true);
             foreach (string key in CondExtraKeys)
             {
                 SettingItem item = MeterSettings.Items.First(i => i.Cmd == key);
@@ -335,13 +340,16 @@ namespace LcrLogger
                 }
                 else c = new TextBox { Width = 70 };
                 condExtra[key] = c;
-                Add(cond, Lbl(key == ":FREQ" ? "주파수 [Hz] (다중 주파수 끌 때)" : item.Name), c);
+                var name = Lbl(key == ":FREQ" ? "주파수 [Hz] (다중 주파수 끌 때)" : item.Name);
+                condMoreRows.Add(name);
+                Add(cond, name, c);
             }
             var extraHint = Lbl("빈칸·\"변경 안 함\"은 계측기 값을 그대로 둠 · 범위는 [계측기 설정] 탭 설명 참고");
             extraHint.ForeColor = Theme.Secondary;
             Add(cond, extraHint);
+            condMoreRows.Add(extraHint);
             cond.SetFlowBreak(extraHint, true);
-            chkRestoreCond = new Switch { Text = "연결 해제하면 계측기 측정 조건을 연결 전 값으로 되돌림 (끄면 바꾼 조건을 계측기에 그대로 둠)", Margin = new Padding(3, 4, 8, 3) };
+            chkRestoreCond = new Switch { Text = "연결 해제하면 계측기 측정 조건을 연결 전 값으로 되돌림 (끄면 바꾼 조건을 계측기에 그대로 둠)", Margin = new Padding(3, 3, 8, 2) };
             cond.Controls.Add(chkRestoreCond);
             cond.SetFlowBreak(chkRestoreCond, true);
 
@@ -367,13 +375,13 @@ namespace LcrLogger
             btnExport = Btn("다른 이름으로 저장", OnExport);
             btnExport.Width = 130;
             btnClear = Btn("표 비우기", delegate { StartNewTable("표를 비웠습니다."); });
-            lblFile = new Label { AutoSize = true, Margin = new Padding(8, 9, 3, 3), ForeColor = Theme.Secondary };
+            lblFile = new Label { AutoSize = true, Margin = new Padding(8, 7, 3, 2), ForeColor = Theme.Secondary };
             Add(save, Lbl("저장 폴더"), txtFolder, btnFolder, btnOpenFolder, btnNewFile, btnExport, btnClear, lblFile);
             layout.Controls.Add(save.Parent);
 
             // 4. 스프레드시트 셀에 바로 입력
             var sheet = Group("4. 스프레드시트에 바로 입력 (엑셀, 구글 시트 등)");
-            chkSheet = new Switch { Text = "사용 - 셀을 선택하고", Margin = new Padding(3, 4, 0, 3) };
+            chkSheet = new Switch { Text = "사용 - 셀을 선택하고", Margin = new Padding(3, 3, 0, 2) };
             cbHotkey = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 55 };
             cbHotkey.Items.AddRange(HotkeyChoices.Select(k => (object)k.ToString()).ToArray());
             cbHotkey.SelectedIndex = 3;
@@ -399,7 +407,7 @@ namespace LcrLogger
             lblLast = new Label
             {
                 AutoSize = true,
-                Font = new Font(Theme.NumberFontName, 18F, FontStyle.Regular),
+                Font = new Font(Theme.NumberFontName, 15F, FontStyle.Regular),
                 ForeColor = Theme.Text,
                 Margin = new Padding(3, 0, 3, 2),
                 Text = "-"
@@ -424,9 +432,9 @@ namespace LcrLogger
                 GridColor = Theme.Separator,
                 EnableHeadersVisualStyles = false,
                 ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
-                ColumnHeadersHeight = 32
+                ColumnHeadersHeight = 26
             };
-            grid.RowTemplate.Height = 28;
+            grid.RowTemplate.Height = 24;
             grid.ColumnHeadersDefaultCellStyle.BackColor = Theme.Card;
             grid.ColumnHeadersDefaultCellStyle.ForeColor = Theme.Secondary;
             grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = Theme.Card;
@@ -491,10 +499,10 @@ namespace LcrLogger
             outer.Controls.Add(logCard);
 
             // 창 맨 아래 오른쪽: 업데이트·정보·개발자 (탭과 상관없이 늘 보임, 오른쪽부터 채움)
-            chkAutoUpdate = new Switch { Text = "하루 한 번 업데이트 확인", Margin = new Padding(3, 4, 12, 3) };
+            chkAutoUpdate = new Switch { Text = "하루 한 번 업데이트 확인", Margin = new Padding(3, 3, 12, 2) };
             btnUpdate = Btn("업데이트 확인", async delegate { await CheckUpdate(false); });
             var btnAbout = Btn("정보", OnAbout);
-            var lblDev = new Label { AutoSize = true, Margin = new Padding(12, 9, 3, 3), ForeColor = Theme.Secondary, Text = "개발자: " + Updater.Developer };
+            var lblDev = new Label { AutoSize = true, Margin = new Padding(12, 7, 3, 2), ForeColor = Theme.Secondary, Text = "개발자: " + Updater.Developer };
             var footer = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false, FlowDirection = FlowDirection.RightToLeft, BackColor = Theme.Bg, Margin = new Padding(0, 6, 0, 0) };
             footer.Controls.AddRange(new Control[] { lblDev, btnAbout, btnUpdate, chkAutoUpdate });
             outer.Controls.Add(footer);
@@ -651,6 +659,9 @@ namespace LcrLogger
             txtBias.Text = settings.Get("BiasVolts", txtBias.Text);
             foreach (string key in CondExtraKeys) SetExtra(key, settings.Get("Cond" + key, ""));
             chkRestoreCond.Checked = settings.Get("RestoreOnClose", "1") == "1";
+            // 값을 넣어 둔 항목이 있으면 펼쳐서 보이게 (접혀 있어도 연결할 때 계측기에 보냄)
+            chkCondMore.Checked = CondExtraKeys.Any(k => GetExtra(k).Length > 0);
+            ShowCondMore();
             cbHotkey.SelectedIndex = settings.GetInt("SheetHotkey", 3, 0, HotkeyChoices.Length - 1);
             cbSheetValues.SelectedIndex = settings.GetInt("SheetValues", 0, 0, 1);
             cbSheetSep.SelectedIndex = settings.GetInt("SheetSep", 0, 0, 1);
@@ -700,6 +711,13 @@ namespace LcrLogger
             settings.Save();
         }
 
+        // 입력 칸은 StyleInputs가 FieldBox로 감쌌으므로 그 테두리 칸(Parent)을 숨김
+        void ShowCondMore()
+        {
+            foreach (Control c in condMoreRows) c.Visible = chkCondMore.Checked;
+            foreach (Control c in condExtra.Values) if (c.Parent is FieldBox) c.Parent.Visible = chkCondMore.Checked;
+        }
+
         static FlowLayoutPanel Group(string title)
         {
             var card = new Card(title, true);
@@ -715,7 +733,7 @@ namespace LcrLogger
 
         static Label Lbl(string text)
         {
-            return new Label { Text = text, AutoSize = true, Margin = new Padding(10, 9, 0, 3), ForeColor = Theme.Text };
+            return new Label { Text = text, AutoSize = true, Margin = new Padding(10, 7, 0, 2), ForeColor = Theme.Text };
         }
 
         static Button Btn(string text, EventHandler onClick, bool primary = false)

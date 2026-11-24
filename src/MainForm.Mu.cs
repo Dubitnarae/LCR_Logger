@@ -37,7 +37,7 @@ namespace LcrLogger
             txtOD = new TextBox { Width = 55, Text = "25" };
             txtID = new TextBox { Width = 55, Text = "15" };
             txtH = new TextBox { Width = 55, Text = "10" };
-            chkDirect = new Switch { Text = "le·Ae 직접 입력", Margin = new Padding(16, 4, 3, 3) };
+            chkDirect = new Switch { Text = "le·Ae 직접 입력", Margin = new Padding(16, 3, 3, 2) };
             txtLe = new TextBox { Width = 70 };
             txtAe = new TextBox { Width = 70 };
             txtRw = new TextBox { Width = 70, Text = "0" };
@@ -88,16 +88,16 @@ namespace LcrLogger
             btnMuStart = Btn("측정 시작", OnMuStart, true);
             btnMuStart.Width = 110;
             btnMuStop = Btn("중지", delegate { muStopRequested = true; Log("복소 투자율 측정 중지 요청 - 지금 점까지 측정하고 멈춥니다."); });
-            muProgress = new ProgressBar { Width = 220, Height = 14, Margin = new Padding(12, 11, 3, 3) };
+            muProgress = new ProgressBar { Width = 220, Height = 14, Margin = new Padding(12, 7, 3, 2) };
             Add(sweep, btnMuStart, btnMuStop, muProgress);
             lay.Controls.Add(sweep.Parent);
 
             var result = Group("결과 (측정이 끝나면 저장 폴더에 CSV와 그래프 PNG를 자동 저장)");
             btnMuCsv = Btn("CSV 다른 이름으로 저장", OnMuSaveCsv);
             btnMuPng = Btn("그래프 PNG 저장", OnMuSavePng);
-            lblMuFile = new Label { AutoSize = true, Margin = new Padding(8, 9, 3, 3), ForeColor = Theme.Secondary };
-            lblMuWarn = new Label { AutoSize = true, Margin = new Padding(10, 6, 3, 3), ForeColor = Theme.Red, Font = new Font(Theme.FontName, 9F, FontStyle.Bold) };
-            chkMuTrust = new Switch { Text = "신뢰 구간 밖 회색 표시", Checked = true, Margin = new Padding(16, 4, 3, 3) };
+            lblMuFile = new Label { AutoSize = true, Margin = new Padding(8, 7, 3, 2), ForeColor = Theme.Secondary };
+            lblMuWarn = new Label { AutoSize = true, Margin = new Padding(10, 5, 3, 2), ForeColor = Theme.Red, Font = new Font(Theme.FontName, 9F, FontStyle.Bold) };
+            chkMuTrust = new Switch { Text = "신뢰 구간 밖 회색 표시", Checked = true, Margin = new Padding(16, 3, 3, 2) };
             chkMuTrust.CheckedChanged += delegate { ShowTrust(); };
             Add(result, btnMuCsv, btnMuPng, chkMuTrust, lblMuFile, lblMuWarn);
             result.SetFlowBreak(lblMuFile, true);

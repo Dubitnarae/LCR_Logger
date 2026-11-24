@@ -75,8 +75,8 @@ namespace LcrLogger
             Dock = DockStyle.Fill;
             AutoSize = autoSize;
             if (autoSize) AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            Margin = new Padding(0, 0, 0, 8);
-            Padding = new Padding(10, title == null ? 8 : 28, 10, 6);
+            Margin = new Padding(0, 0, 0, 6);
+            Padding = new Padding(10, title == null ? 6 : 24, 10, 4);
         }
 
         // 주어진 너비에서 안쪽 내용이 줄바꿈된 뒤의 높이를 돌려줌 (자동 크기 카드)
@@ -119,7 +119,7 @@ namespace LcrLogger
             if (title != null)
             {
                 using (var f = new Font(Theme.FontName, 9.5F, FontStyle.Bold))
-                    TextRenderer.DrawText(g, title, f, new Point(14, 8), Theme.Text, Theme.Card);
+                    TextRenderer.DrawText(g, title, f, new Point(14, 6), Theme.Text, Theme.Card);
             }
         }
     }
@@ -137,14 +137,14 @@ namespace LcrLogger
             FlatStyle = FlatStyle.Flat;
             FlatAppearance.BorderSize = 0;
             Cursor = Cursors.Hand;
-            Margin = new Padding(4, 3, 4, 3);
+            Margin = new Padding(3, 2, 3, 2);
             AccessibleRole = AccessibleRole.PushButton;
         }
 
         public override Size GetPreferredSize(Size proposedSize)
         {
             Size t = TextRenderer.MeasureText(Text, Font);
-            return new Size(t.Width + 28, Math.Max(30, t.Height + 12));
+            return new Size(t.Width + 24, Math.Max(26, t.Height + 8));
         }
 
         protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
@@ -183,7 +183,7 @@ namespace LcrLogger
     {
         readonly Control inner;
         bool focused;
-        const int Height0 = 30, PadLeft = 7, PadRight = 3;
+        const int Height0 = 26, PadLeft = 7, PadRight = 3;
         static readonly Color Border = Color.FromArgb(199, 199, 204);
         static readonly Color DisabledFill = Color.FromArgb(242, 242, 245);
 
@@ -191,7 +191,7 @@ namespace LcrLogger
         {
             this.inner = inner;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
-            Margin = new Padding(4, 3, 4, 3);
+            Margin = new Padding(3, 2, 3, 2);
             var box = inner as TextBox;
             Size = new Size(inner.Width + PadLeft + PadRight, box != null && box.Multiline ? inner.Height + 8 : Height0);
             inner.Margin = Padding.Empty;

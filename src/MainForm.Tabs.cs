@@ -64,7 +64,7 @@ namespace LcrLogger
             btnSwStart = Btn("측정 시작", OnSwStart, true);
             btnSwStart.Width = 110;
             btnSwStop = Btn("중지", delegate { swStopRequested = true; Log("스윕 측정 중지 요청 - 지금 점까지 측정하고 멈춥니다."); });
-            swProgress = new ProgressBar { Width = 220, Height = 14, Margin = new Padding(12, 11, 3, 3) };
+            swProgress = new ProgressBar { Width = 220, Height = 14, Margin = new Padding(12, 7, 3, 2) };
             Add(pts, btnSwStart, btnSwStop, swProgress, Hint("측정값은 계측기의 PAR1~PAR4 (계측기 설정 탭에서 바꿈). 신호 종류·주파수는 끝나면 원래대로 되돌림"));
             lay.Controls.Add(pts.Parent);
 
@@ -78,7 +78,7 @@ namespace LcrLogger
             {
                 if (swRows.Count > 0) SaveAs("PNG 그림 (*.png)|*.png", SwDialogName(".png"), path => Permeability.SavePng(swChart, path));
             });
-            lblSwFile = new Label { AutoSize = true, Margin = new Padding(8, 9, 3, 3), ForeColor = Theme.Secondary };
+            lblSwFile = new Label { AutoSize = true, Margin = new Padding(8, 7, 3, 2), ForeColor = Theme.Secondary };
             Add(result, btnSwCsv, btnSwPng, lblSwFile);
             lay.Controls.Add(result.Parent);
             lay.Controls.Add(new Panel { Height = 0, Margin = Padding.Empty });   // 행 번호를 복소 투자율 탭과 맞춤 (그래프 = 3행)
