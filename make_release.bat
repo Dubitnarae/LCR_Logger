@@ -5,7 +5,7 @@ call "%ROOT%build.bat" || exit /b 1
 rem self test of the built exe - stop if it fails
 "%ROOT%LCR_Logger.exe" --selftest > "%ROOT%selftest_out.txt"
 findstr /x /c:"SELFTEST OK" "%ROOT%selftest_out.txt" >nul || (echo SELFTEST FAILED - see selftest_out.txt & exit /b 1)
-powershell -NoProfile -Command ^
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$ErrorActionPreference='Stop'; $root='%ROOT%';" ^
   "$v=(Get-Item (Join-Path $root 'LCR_Logger.exe')).VersionInfo.FileVersion -replace '\.0\.0$','' -replace '^(\d+\.\d+\.\d+)\.0$','$1'; $stage=Join-Path $root ('release\LCR_Logger_v'+$v); $zip=$stage+'.zip';" ^
   "if (Test-Path $stage) { Remove-Item -Recurse -Force $stage };" ^
