@@ -43,7 +43,7 @@ namespace LcrLogger
             ":TRIG:DEL", ":SSO", ":SSO:WAIT", ":DCR:DCD", ":DCR:ADJD", ":DCR:LFR" };
         readonly Dictionary<string, Control> condExtra = new Dictionary<string, Control>();
         Switch chkRestoreCond, chkCondMore;
-        readonly List<Control> condMoreRows = new List<Control>();   // 접었다 펴는 추가 항목의 이름표·설명 (입력 칸은 condExtra)
+        readonly List<Control> condMoreRows = new List<Control>();   // 접었다 펴는 추가 항목 표·설명
         MeasCond connectCond;                       // 연결할 때 적용한 측정 조건 (재연결 때 다시 보냄)
         Dictionary<string, string> savedCond;       // 바꾸기 전 계측기 값 (연결 해제할 때 복원)
         Button btnRefresh, btnConnect, btnMeasure, btnAuto, btnFolder, btnOpenFolder, btnNewFile, btnExport, btnClear, btnSend, btnUpdate;
@@ -326,8 +326,13 @@ namespace LcrLogger
             chkCondMore.CheckedChanged += delegate { ShowCondMore(); };
             cond.Controls.Add(chkCondMore);
             cond.SetFlowBreak(chkCondMore, true);
-            foreach (string key in CondExtraKeys)
+            // 그 밖의 항목: 이름표·칸을 3쌍씩 열을 맞춰 표처럼 (줄줄이 이어 붙이면 어느 칸의 이름인지 헷갈림)
+            const int MorePairs = 3;
+            var more = new TableLayoutPanel { AutoSize = true, ColumnCount = MorePairs * 2, BackColor = Theme.Card, Margin = new Padding(0, 0, 0, 2) };
+            for (int i = 0; i < MorePairs * 2; i++) more.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            for (int k = 0; k < CondExtraKeys.Length; k++)
             {
+                string key = CondExtraKeys[k];
                 SettingItem item = MeterSettings.Items.First(i => i.Cmd == key);
                 Control c;
                 if (item.Choices != null)
@@ -338,13 +343,18 @@ namespace LcrLogger
                     cb.SelectedIndex = 0;
                     c = cb;
                 }
-                else c = new TextBox { Width = 70 };
+                else c = new TextBox { Width = 100 };
                 condExtra[key] = c;
-                var name = Lbl(key == ":FREQ" ? "주파수 [Hz] (다중 주파수 끌 때)" : item.Name);
-                condMoreRows.Add(name);
-                Add(cond, name, c);
+                int col = k % MorePairs * 2, row = k / MorePairs;
+                var name = Lbl(key == ":FREQ" ? "주파수 [Hz]" : item.Name);
+                if (col > 0) name.Margin = new Padding(26, name.Margin.Top, 0, name.Margin.Bottom);   // 앞 열 칸과 떨어뜨림
+                more.Controls.Add(name, col, row);
+                more.Controls.Add(c, col + 1, row);
             }
-            var extraHint = Lbl("빈칸·\"변경 안 함\"은 계측기 값을 그대로 둠 · 범위는 [계측기 설정] 탭 설명 참고");
+            cond.Controls.Add(more);
+            cond.SetFlowBreak(more, true);
+            condMoreRows.Add(more);
+            var extraHint = Lbl("빈칸·\"변경 안 함\"은 계측기 값을 그대로 둠 · 주파수는 다중 주파수를 끌 때만 씀 · 범위는 [계측기 설정] 탭 설명 참고");
             extraHint.ForeColor = Theme.Secondary;
             Add(cond, extraHint);
             condMoreRows.Add(extraHint);
@@ -711,11 +721,13 @@ namespace LcrLogger
             settings.Save();
         }
 
-        // 입력 칸은 StyleInputs가 FieldBox로 감쌌으므로 그 테두리 칸(Parent)을 숨김
         void ShowCondMore()
         {
+            // 한꺼번에 배치: 하나씩 보이게 하면 칸이 주르륵 나타나며 매번 다시 배치됨
+            Control flow = condMoreRows[0].Parent;
+            flow.SuspendLayout();
             foreach (Control c in condMoreRows) c.Visible = chkCondMore.Checked;
-            foreach (Control c in condExtra.Values) if (c.Parent is FieldBox) c.Parent.Visible = chkCondMore.Checked;
+            flow.ResumeLayout(true);
         }
 
         static FlowLayoutPanel Group(string title)
@@ -758,12 +770,15 @@ namespace LcrLogger
 
                 if (!wrap) { StyleInputs(c); continue; }
                 int index = parent.Controls.GetChildIndex(c);
+                var table = parent as TableLayoutPanel;
+                TableLayoutPanelCellPosition cell = table != null ? table.GetPositionFromControl(c) : new TableLayoutPanelCellPosition();
                 var flow = parent as FlowLayoutPanel;
                 bool brk = flow != null && flow.GetFlowBreak(c);   // 감싸면 SetFlowBreak가 사라지므로 옮겨 줌
                 parent.Controls.Remove(c);
                 var field = new FieldBox(c);
                 parent.Controls.Add(field);
                 parent.Controls.SetChildIndex(field, index);
+                if (table != null) table.SetCellPosition(field, cell);   // 표 안이면 같은 칸에 다시 넣음
                 if (brk) flow.SetFlowBreak(field, true);
             }
         }
