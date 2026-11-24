@@ -203,7 +203,8 @@ namespace LcrLogger
         }
 
         // frequencyLabels가 비어 있으면 단일 측정, 있으면 주파수마다 파라미터 열을 반복
-        public static List<string> HeaderFields(List<string> pars, int inductanceUnit, List<string> frequencyLabels)
+        // mu: 코어 치수로 계산한 μ′ 열을 파라미터 열 뒤에 붙임 (주파수마다 하나)
+        public static List<string> HeaderFields(List<string> pars, int inductanceUnit, List<string> frequencyLabels, bool mu = false)
         {
             var fields = new List<string> { "No", "측정시각", "메모", "측정조건" };
             if (frequencyLabels.Count == 0)
@@ -211,6 +212,11 @@ namespace LcrLogger
             else
                 foreach (string f in frequencyLabels)
                     fields.AddRange(pars.Select(p => Header(p, inductanceUnit, f)));
+            if (mu)
+            {
+                if (frequencyLabels.Count == 0) fields.Add("μ′");
+                else fields.AddRange(frequencyLabels.Select(f => "μ′@" + f));
+            }
             fields.Add("모니터 V,I");
             fields.Add("레벨 경고");
             fields.Add("원본응답");
@@ -223,7 +229,8 @@ namespace LcrLogger
         }
 
         // moni: 주파수별 :MONI? 응답("V,I")을 " | "로 이은 것, warn: 측정 신호가 설정과 다를 때 경고
-        public static string[] RowFields(int no, DateTime time, string memo, string condition, List<string> pars, List<string> responses, int inductanceUnit, string moni = "", string warn = "")
+        // mus: 주파수별 μ′ (null이면 μ′ 열 없음, NaN은 빈칸)
+        public static string[] RowFields(int no, DateTime time, string memo, string condition, List<string> pars, List<string> responses, int inductanceUnit, string moni = "", string warn = "", List<double> mus = null)
         {
             var fields = new List<string>
             {
@@ -238,10 +245,25 @@ namespace LcrLogger
                 for (int i = 0; i < pars.Count; i++)
                     fields.Add(i < tokens.Length ? CellValue(pars[i], tokens[i], inductanceUnit) : "");
             }
+            if (mus != null) fields.AddRange(mus.Select(MuText));
             fields.Add(moni);
             fields.Add(warn);
             fields.Add(string.Join(" | ", responses));
             return fields.ToArray();
+        }
+
+        // μ′ = L·k, k = le/(μ0·N²·Ae) [SI]. 인덕턴스 파라미터가 없거나 측정값 없음(±9.99999E+33)이면 NaN
+        public static double MuOf(List<string> pars, string response, double k)
+        {
+            int i = pars.FindIndex(IsInductance);
+            string[] tokens = Tokens(response);
+            double v;
+            return i >= 0 && i < tokens.Length && TryParse(tokens[i], out v) && Math.Abs(v) < 1e30 ? v * k : double.NaN;
+        }
+
+        public static string MuText(double mu)
+        {
+            return double.IsNaN(mu) || double.IsInfinity(mu) ? "" : mu.ToString("G5", CultureInfo.InvariantCulture);
         }
 
         // 추이 그래프 점: 주파수마다 인덕턴스(없으면 첫 파라미터) 값 하나. row는 RowFields 결과 (앞 4칸 뒤에 주파수별 파라미터)

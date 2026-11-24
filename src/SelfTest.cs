@@ -224,6 +224,16 @@ namespace LcrLogger
             MuRow known = Permeability.Calc(f0, Math.Sqrt(rs * rs + xs * xs), Math.Atan2(xs, rs) * 180 / Math.PI, 0.05, 10, le / 1000, ae / 1e6);
             Check(Near(known.Mu1, 10000, 1e-9) && Near(known.Mu2, 2000, 1e-9) && Near(known.TanD, 0.2, 1e-9) && Near(known.Ls, ls, 1e-9) && Near(known.Rs, rs, 1e-9),
                 "알려진 L, R → μ′=" + known.Mu1 + ", μ″=" + known.Mu2);
+            // 인덕턴스 기록 탭의 μ′: k = le/(μ0·N²·Ae), 응답의 Ls에 곱함 (Q 등 다른 파라미터가 앞에 있어도)
+            double kMu = (le / 1000) / (Permeability.Mu0 * 100 * (ae / 1e6));
+            var qLs = new List<string> { "Q", "LS" };
+            Check(Near(Fmt.MuOf(qLs, "1.0E+01," + ls.ToString("R", CultureInfo.InvariantCulture), kMu), 10000, 1e-9) && Fmt.MuText(10000.4) == "10000",
+                "기록 탭 μ′ 계산 (Ls → μ′=10000)");
+            Check(double.IsNaN(Fmt.MuOf(qLs, "1.0E+01,9.99999E+33", kMu)) && double.IsNaN(Fmt.MuOf(new List<string> { "Z" }, "1.0E+01", kMu)) && Fmt.MuText(double.NaN) == "",
+                "기록 탭 μ′: 측정값 없음·인덕턴스 없음은 빈칸");
+            var muHead = Fmt.HeaderFields(qLs, 2, new List<string> { "1kHz", "1MHz" }, true);
+            string[] muRow = Fmt.RowFields(1, DateTime.Now, "", "", qLs, new List<string> { "1,1E-4", "2,2E-4" }, 2, "", "", new List<double> { 1000, double.NaN });
+            Check(muHead.Count == muRow.Length && muHead.IndexOf("μ′@1kHz") == 8 && muRow[8] == "1000" && muRow[9] == "" && muHead[10] == "모니터 V,I", "기록 탭 μ′ 열 위치 (파라미터 뒤, 모니터 앞)");
 
             Check(double.IsNaN(Permeability.Value("-9.99999E+33")) && double.IsNaN(Permeability.Value("9.99999E+33")) && Permeability.Value(" 5.1200E-02") == 0.0512, "측정값 없음(±9.99999E+33) 처리");
             Check(Near(Permeability.MeasureRdc(m, new List<string>()), DemoMeter.CoreRw, 1e-9) && m.Query(":PAR1?") != "RDC", "DCR 측정 후 PAR 복원");

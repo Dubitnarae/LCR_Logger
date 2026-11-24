@@ -108,6 +108,15 @@ namespace LcrLogger
                     Log("※ 응답 값 개수(" + count + ")가 파라미터 개수(" + pars.Count + ")와 다릅니다. 원본응답 열을 확인하세요.");
             }
 
+            // 코어 설정이 바뀌면 μ′ 열·CSV 위쪽 코어 치수가 달라지므로 새 표로
+            if (CoreText() != tableCore)
+            {
+                if (rows.Count > 0) StartNewTable("코어 설정이 바뀌어 새 파일로 시작합니다.");
+                else SetupColumns();
+            }
+            double k = CoreK();
+            List<double> mus = tableCore.Length > 0 ? responses.Select(r => Fmt.MuOf(pars, r, k)).ToList() : null;
+
             lastResponses = responses;
             lastPars = pars;
             string warn = Permeability.RowWarning(Permeability.LevelOf(condText), monis, responses.Count > 1 ? freqLabels : new List<string>());
@@ -117,7 +126,7 @@ namespace LcrLogger
                 SystemSounds.Exclamation.Play();
             }
             levelWarned = warn.Length > 0;
-            string[] row = Fmt.RowFields(rows.Count + 1, DateTime.Now, txtMemo.Text, condText, pars, responses, unitIndex, string.Join(" | ", monis), warn);
+            string[] row = Fmt.RowFields(rows.Count + 1, DateTime.Now, txtMemo.Text, condText, pars, responses, unitIndex, string.Join(" | ", monis), warn, mus);
             rows.Add(row);
             WriteCsv(row);   // 데이터부터 저장: 아래 화면 표시에서 오류가 나도 기록은 남음
             grid.Rows.Add(row);
@@ -150,9 +159,11 @@ namespace LcrLogger
                 {
                     string[] tokens = Fmt.Tokens(responses[f]);
                     if (shown < tokens.Length && shown < pars.Count)
-                        parts.Add(freqLabels[f] + ": " + Fmt.Pretty(pars[shown], tokens[shown]).Split('=')[1].Trim());
+                        parts.Add(freqLabels[f] + ": " + Fmt.Pretty(pars[shown], tokens[shown]).Split('=')[1].Trim()
+                            + (mus != null && Fmt.MuText(mus[f]).Length > 0 ? " (μ′ " + Fmt.MuText(mus[f]) + ")" : ""));
                 }
             }
+            if (mus != null && responses.Count == 1) parts.Add("μ′ = " + (Fmt.MuText(mus[0]).Length > 0 ? Fmt.MuText(mus[0]) : "계산 불가"));
             lblLast.Text = "#" + rows.Count + "   " + (parts.Count > 0 ? string.Join("    ", parts) : string.Join(" | ", responses))
                 + (warn.Length > 0 ? "    ※ 레벨 경고 (표의 레벨 경고 열 참고)" : "");
             lblLast.ForeColor = warn.Length > 0 ? Theme.Red : Theme.Text;
@@ -174,7 +185,7 @@ namespace LcrLogger
                 if (csv.FilePath == null)
                 {
                     csvSnap = meterSnap;
-                    csv.Start(txtFolder.Text, Fmt.HeaderFields(pars, unitIndex, freqLabels), CsvInfo());
+                    csv.Start(txtFolder.Text, Fmt.HeaderFields(pars, unitIndex, freqLabels, tableCore.Length > 0), CsvInfo());
                     Log("저장 파일: " + csv.FilePath);
                 }
                 csv.Append(row);
@@ -346,7 +357,8 @@ namespace LcrLogger
         void SetupColumns()
         {
             grid.Columns.Clear();
-            List<string> header = Fmt.HeaderFields(pars, unitIndex, freqLabels);
+            tableCore = CoreText();
+            List<string> header = Fmt.HeaderFields(pars, unitIndex, freqLabels, tableCore.Length > 0);
             foreach (string h in header)
             {
                 int c = grid.Columns.Add(h, h);
@@ -366,6 +378,7 @@ namespace LcrLogger
         List<KeyValuePair<string, string>> CsvInfo()
         {
             var info = new List<KeyValuePair<string, string>> { new KeyValuePair<string, string>("계측기", currentIdn ?? "") };
+            if (tableCore.Length > 0) info.Add(new KeyValuePair<string, string>("코어", tableCore));
             if (csvSnap != null) info.AddRange(csvSnap);
             return info;
         }
@@ -432,7 +445,7 @@ namespace LcrLogger
             {
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
                 var lines = Fmt.InfoLines(CsvInfo());
-                lines.Add(Fmt.CsvLine(Fmt.HeaderFields(pars, unitIndex, freqLabels)));
+                lines.Add(Fmt.CsvLine(Fmt.HeaderFields(pars, unitIndex, freqLabels, tableCore.Length > 0)));
                 lines.AddRange(rows.Select(r => Fmt.CsvLine(r)));
                 File.WriteAllText(dlg.FileName, string.Join("\r\n", lines) + "\r\n", new UTF8Encoding(true));
                 Log("저장 완료: " + dlg.FileName);

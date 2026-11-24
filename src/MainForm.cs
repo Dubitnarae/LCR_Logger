@@ -153,7 +153,7 @@ namespace LcrLogger
             if (justUpdated) Log("버전 " + Updater.CurrentText + "(으)로 업데이트했습니다.");
         }
 
-        const int GridRow = 6;   // layout에서 측정 기록 표가 들어 있는 행 (카드 6개 다음)
+        const int GridRow = 7;   // layout에서 측정 기록 표가 들어 있는 행 (카드 7개 다음)
 
         // 남는 공간이 최소 높이보다 작으면 채움 행을 고정 높이로 바꿔 스크롤바가 생기게 함. 공간이 넉넉하면 원래대로 채움
         static void FitFillRow(TableLayoutPanel layout, int row, int min)
@@ -263,6 +263,7 @@ namespace LcrLogger
                 Lbl("간격(초)"), numInterval, Lbl("횟수(0=무한)"), numCount, btnAuto);
             meas.SetFlowBreak(chkTrg, true);
             layout.Controls.Add(meas.Parent);
+            layout.Controls.Add(BuildCoreCard().Parent);
 
             // 다중 주파수: LCR 모드에서 주파수를 바꿔 가며 한 번에 측정 (연속 측정 모드 대신)
             var multi = Group("다중 주파수 측정 (연결 전에 설정)");
@@ -658,6 +659,7 @@ namespace LcrLogger
             chkAutoUpdate.Checked = settings.Get("AutoUpdate", "1") == "1";
             chkReconnect.Checked = settings.Get("AutoReconnect", "1") == "1";
             LoadMuSettings();
+            LoadCoreSettings();
             SetupColumns();
         }
 
@@ -692,6 +694,7 @@ namespace LcrLogger
             settings.Set("AutoReconnect", chkReconnect.Checked ? "1" : "0");
             settings.Set("Freqs", string.Join(";", txtFreq.Select(t => t.Text.Trim())));
             SaveMuSettings();
+            SaveCoreSettings();
             var port = cbPort.SelectedItem as PortItem;
             if (port != null) settings.Set("Port", port.Port);
             settings.Save();
@@ -778,6 +781,7 @@ namespace LcrLogger
             bool condEditable = !busy && !waitingReconnect && !autoRunning;
             foreach (ComboBox c in cbPar) c.Enabled = condEditable;
             cbPreset.Enabled = btnPresetSave.Enabled = btnPresetDelete.Enabled = condEditable;
+            chkCore.Enabled = cbCore.Enabled = btnCoreSave.Enabled = btnCoreDelete.Enabled = numCoreN.Enabled = txtCoreOD.Enabled = txtCoreID.Enabled = txtCoreH.Enabled = !autoRunning;
             btnApplyCond.Enabled = connected && condEditable;
             cbLevel.Enabled = txtCv.Enabled = cbSpeed.Enabled = cbBias.Enabled = txtBias.Enabled = condEditable;
             foreach (Control c in condExtra.Values) c.Enabled = condEditable;
