@@ -150,6 +150,9 @@ namespace LcrLogger
                 var lsLp = new List<string> { "LP", "Q", "LS" };
                 List<string> picked = Fmt.TypedValues(lsLp, new List<string> { "2.0E-04,4.5E+01,1.0E-04", "1.9E-04,9.0E+01,0.9E-04" }, 2, true);
                 Check(string.Join(",", picked) == "100,90", "Lp가 같이 있어도 Ls만 입력");
+                List<string> withMu = Fmt.TypedValues(new List<string> { "LS", "Q" }, new List<string> { "1.0E-04,4.5E+01", "2.0E-04,9.0E+01" }, 2, true, true, 1e7);
+                Check(string.Join(",", withMu) == "100,1000,200,2000", "시트 입력 Ls와 μ′ (주파수마다 Ls, μ′) " + string.Join(",", withMu));
+                Check(string.Join(",", Fmt.TypedValues(new List<string> { "LS" }, new List<string> { "1.0E-04" }, 2, true, true, double.NaN)) == "100,", "코어 꺼짐이면 μ′ 칸 비움");
                 output.AppendLine("셀 입력값(인덕턴스만): " + string.Join(" [Tab] ", lOnly));
                 output.AppendLine("셀 입력값(전체): " + string.Join(" [Tab] ", all));
                 multiWriter.Append(Fmt.RowFields(1, DateTime.Now, "", MeasCond.Summary(m), pars, responses, 2, "1.0E+00,1.0E-03", "레벨 시험"));

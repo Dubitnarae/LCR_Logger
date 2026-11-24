@@ -396,7 +396,7 @@ namespace LcrLogger
             cbHotkey.Items.AddRange(HotkeyChoices.Select(k => (object)k.ToString()).ToArray());
             cbHotkey.SelectedIndex = 3;
             cbSheetValues = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 120 };
-            cbSheetValues.Items.AddRange(new object[] { "Ls만", "모든 파라미터" });
+            cbSheetValues.Items.AddRange(new object[] { "Ls만", "모든 파라미터", "Ls와 μ′" });
             cbSheetValues.SelectedIndex = 0;
             cbSheetSep = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 120 };
             cbSheetSep.Items.AddRange(new object[] { "Tab (오른쪽 칸)", "Enter (아래 칸)" });
@@ -673,7 +673,7 @@ namespace LcrLogger
             chkCondMore.Checked = CondExtraKeys.Any(k => GetExtra(k).Length > 0);
             ShowCondMore();
             cbHotkey.SelectedIndex = settings.GetInt("SheetHotkey", 3, 0, HotkeyChoices.Length - 1);
-            cbSheetValues.SelectedIndex = settings.GetInt("SheetValues", 0, 0, 1);
+            cbSheetValues.SelectedIndex = settings.GetInt("SheetValues", 0, 0, 2);
             cbSheetSep.SelectedIndex = settings.GetInt("SheetSep", 0, 0, 1);
             cbSheetEnd.SelectedIndex = settings.GetInt("SheetEnd", 0, 0, 2);
             chkSheet.Checked = settings.Get("SheetInput", "0") == "1";

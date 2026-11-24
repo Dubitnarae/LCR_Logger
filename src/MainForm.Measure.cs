@@ -305,7 +305,10 @@ namespace LcrLogger
                 Log("단축키: 다른 창으로 바뀌어 입력하지 않았습니다 (CSV에는 저장됨).");
                 return;
             }
-            List<string> values = Fmt.TypedValues(valuePars, responses, unitIndex, cbSheetValues.SelectedIndex == 0);
+            bool withMu = cbSheetValues.SelectedIndex == 2;   // "Ls와 μ′"
+            double muK = chkCore.Checked ? CoreK() : double.NaN;
+            if (withMu && double.IsNaN(muK)) Log("※ [코어 투자율]이 꺼져 있거나 치수가 잘못되어 μ′ 칸은 비워 둡니다.");
+            List<string> values = Fmt.TypedValues(valuePars, responses, unitIndex, cbSheetValues.SelectedIndex != 1, withMu, muK);
             Keys separator = cbSheetSep.SelectedIndex == 0 ? Keys.Tab : Keys.Enter;
             try
             {

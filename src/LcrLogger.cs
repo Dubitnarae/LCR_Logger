@@ -29,8 +29,8 @@ using Charting = System.Windows.Forms.DataVisualization.Charting;
 [assembly: System.Reflection.AssemblyProduct("LCR Logger")]
 [assembly: System.Reflection.AssemblyCompany("KIM YEONGDO")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 KIM YEONGDO")]
-[assembly: System.Reflection.AssemblyVersion("1.35.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.35.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.36.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.36.0.0")]
 
 namespace LcrLogger
 {

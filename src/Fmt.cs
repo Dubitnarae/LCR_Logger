@@ -172,7 +172,8 @@ namespace LcrLogger
         }
 
         // 셀에 입력할 값 목록 (주파수 순서). lsOnly면 주파수마다 Ls 하나 (Ls가 없으면 Lp, 둘 다 없으면 전체).
-        public static List<string> TypedValues(List<string> pars, List<string> responses, int inductanceUnit, bool lsOnly)
+        // withMu면 주파수마다 값 뒤에 μ′ (muK = le/(μ0·N²·Ae), NaN이면 빈칸: 열이 밀리지 않게)
+        public static List<string> TypedValues(List<string> pars, List<string> responses, int inductanceUnit, bool lsOnly, bool withMu = false, double muK = double.NaN)
         {
             int pick = pars.IndexOf("LS");
             if (pick < 0) pick = pars.IndexOf("LP");
@@ -185,6 +186,7 @@ namespace LcrLogger
                     if (lsOnly && pick >= 0 && i != pick) continue;
                     values.Add(i < tokens.Length ? PlainNumber(CellValue(pars[i], tokens[i], inductanceUnit)) : "");
                 }
+                if (withMu) values.Add(PlainNumber(MuText(MuOf(pars, response, muK))));
             }
             return values;
         }
